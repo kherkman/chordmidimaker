@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chord Sequencer & Generator (Multi-Track)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="app-container">
+        
+        <!-- YLÄPALKKI: Playback, Tempo, Midi, Export -->
+        <header class="top-bar">
+            <!-- Playback -->
+            <div class="playback-controls">
+                <button id="btnPlay" class="action-btn" title="Käynnistä/Tauota (Space)">▶ Play</button>
+                <button id="btnStop" class="action-btn" title="Pysäytä (S)">■ Stop</button>
+            </div>
+
+            <!-- Tempo -->
+            <div class="tempo-controls">
+                <label>BPM:</label>
+                <input type="number" id="tempoInput" value="120" min="20" max="300">
+                <button id="btnTap" class="small-btn">TAP</button>
+            </div>
+
+            <!-- Transpose & Color (Värivalitsin lisätään tähän JS:llä) -->
+            <div class="transpose-controls">
+                <button id="btnTransDown" class="small-btn">▼</button>
+                <span>Transpose</span>
+                <button id="btnTransUp" class="small-btn">▲</button>
+                <!-- JS lisää color-pickerin tähän -->
+            </div>
+
+            <!-- Midi & Project (Save/Load lisätään tähän JS:llä) -->
+            <div class="midi-controls">
+                <!-- JS lisää Save/Load napit tähän -->
+                <select id="midiOutSelect">
+                    <option value="">-- MIDI Out --</option>
+                </select>
+                <button id="btnExport" class="action-btn secondary">Export MIDI</button>
+            </div>
+        </header>
+
+        <!-- ASTEIKON VALINTA: Piano -->
+        <section class="scale-section">
+            <h3>Valitse Asteikko (Scale)</h3>
+            <p class="info-text">Valitse nuotit pianosta. Vaikuttaa generointiin ja visualisointiin.</p>
+            <div id="scalePiano" class="piano-wrapper">
+                <div class="key white" data-note="0" title="C (Näppäin: 1)"></div>
+                <div class="key black" data-note="1" title="C# (Näppäin: 2)"></div>
+                <div class="key white" data-note="2" title="D (Näppäin: 3)"></div>
+                <div class="key black" data-note="3" title="D# (Näppäin: 4)"></div>
+                <div class="key white" data-note="4" title="E (Näppäin: 5)"></div>
+                <div class="key white" data-note="5" title="F (Näppäin: 6)"></div>
+                <div class="key black" data-note="6" title="F# (Näppäin: 7)"></div>
+                <div class="key white" data-note="7" title="G (Näppäin: 8)"></div>
+                <div class="key black" data-note="8" title="G# (Näppäin: 9)"></div>
+                <div class="key white" data-note="9" title="A (Näppäin: 0)"></div>
+                <div class="key black" data-note="10" title="A# (Näppäin: I)"></div>
+                <div class="key white" data-note="11" title="B (Näppäin: O)"></div>
+            </div>
+        </section>
+
+        <!-- SOINNUN RAKENTAJA -->
+        <section class="builder-section">
+            
+            <!-- Rivi 1: Octave & Root Notes -->
+            <div class="grid-row-split">
+                <div class="control-group octave-group">
+                    <h4>Octave</h4>
+                    <div class="button-grid octave-grid" id="octaveButtons">
+                        <button data-oct="2">2</button>
+                        <button data-oct="3" class="selected">3</button>
+                        <button data-oct="4">4</button>
+                        <button data-oct="5">5</button>
+                    </div>
+                </div>
+
+                <div class="control-group root-group">
+                    <h4>Root Note (1-0, I, O) / Pause (P)</h4>
+                    <div class="button-grid root-grid" id="rootButtons">
+                        <!-- Nuotit -->
+                        <button data-root="0">C</button>
+                        <button data-root="1">C#</button>
+                        <button data-root="2">D</button>
+                        <button data-root="3">D#</button>
+                        <button data-root="4">E</button>
+                        <button data-root="5">F</button>
+                        <button data-root="6">F#</button>
+                        <button data-root="7">G</button>
+                        <button data-root="8">G#</button>
+                        <button data-root="9">A</button>
+                        <button data-root="10">A#</button>
+                        <button data-root="11">B</button>
+                        <!-- Tauko -->
+                        <button data-root="pause" class="pause-btn">PAUSE</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Rivi 2: Chord Type -->
+            <div class="control-group">
+                <h4>Chord Type</h4>
+                <div class="button-grid type-grid" id="typeButtons">
+                    <!-- Basic -->
+                    <button data-type="maj" class="selected">Maj</button>
+                    <button data-type="min">Min</button>
+                    
+                    <!-- Suspended -->
+                    <button data-type="sus2">Sus2</button>
+                    <button data-type="sus4">Sus4</button>
+
+                    <!-- 6th -->
+                    <button data-type="6">Maj6</button>
+                    <button data-type="m6">Min6</button>
+
+                    <!-- 7th -->
+                    <button data-type="7">7th Dom</button>
+                    <button data-type="maj7">7th Maj</button>
+                    <button data-type="m7">7th Min</button>
+                    <button data-type="mmaj7">mMaj7</button>
+
+                    <!-- Dim / Aug -->
+                    <button data-type="dim">Dim</button>
+                    <button data-type="dim7">Dim7</button>
+                    <button data-type="m7b5">m7b5</button>
+                    <button data-type="aug">Aug</button>
+
+                    <!-- Extensions -->
+                    <button data-type="add9">Add9</button>
+                    <button data-type="9">9th</button>
+                    <button data-type="11">11th</button>
+                    <button data-type="13">13th</button>
+                </div>
+            </div>
+
+            <!-- Rivi 3: Inversion & Duration -->
+             <div class="grid-row-split">
+                <div class="control-group">
+                    <h4>Inversion</h4>
+                    <div class="button-grid" id="invButtons" style="grid-template-columns: repeat(4, 1fr);">
+                        <button data-inv="0" class="selected">0</button>
+                        <button data-inv="1">1</button>
+                        <button data-inv="2">2</button>
+                        <button data-inv="3">3</button>
+                    </div>
+                </div>
+
+                <div class="control-group" style="flex-grow: 1;">
+                    <h4>Duration (Bass Generation Speed)</h4>
+                    <div class="button-grid" id="durButtons" style="grid-template-columns: repeat(9, 1fr);">
+                        <button data-dur="1">1/16</button>
+                        <button data-dur="2">1/8</button>
+                        <button data-dur="4" class="selected">1/4</button>
+                        <button data-dur="1.333">1/3</button> 
+                        <button data-dur="2.666">2/3</button>
+                        <button data-dur="8">1/2</button>
+                        <button data-dur="16">1</button>
+                        <button data-dur="32">2</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Rivi 5: ARP SEQ -->
+            <div class="control-group" style="background: #222; padding: 10px; border-radius: 4px; border: 1px solid #333; margin-top: 10px;">
+                <h4 style="margin-bottom: 5px;">Arpeggiator</h4>
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <div style="display: flex; flex-direction: column;">
+                        <label style="font-size: 0.7rem; color: #888;">SEQ (1 2 3... 0=Pause)</label>
+                        <input type="text" id="arpSeqInput" value="1 2 3 2" style="width: 120px; text-align: left;">
+                    </div>
+                    
+                    <button id="btnArpOctLow" class="small-btn">OCT -</button>
+                    <button id="btnArpOctHigh" class="small-btn">OCT +</button>
+                    
+                    <button id="btnArp" class="action-btn" style="background: #311b92; border-color: #512da8; margin-left: auto;">GENERATE ARP</button>
+                </div>
+            </div>
+
+            <!-- Rivi 6: Main Actions & RND -->
+            <div class="control-group action-group">
+                <button id="btnAddChord" class="big-btn" title="Pikanäppäin: A">LISÄÄ NUOTTI/SOINTU (A)</button>
+                
+                <div class="rnd-wrapper">
+                    <div class="rnd-settings">
+                        <label>Muutos:</label>
+                        <select id="rndVoiceCount">
+                            <option value="1">1 ääni</option>
+                            <option value="2">2 ääntä</option>
+                            <option value="all">Kaikki</option>
+                        </select>
+                    </div>
+                    <button id="btnRnd" class="big-btn rnd-btn" title="Pikanäppäin: R">RND SOINTU (R)</button>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- SEKVENSSI NÄKYMÄ -->
+        <section class="sequence-section">
+            
+            <!-- Channel Selector (UUSI) -->
+            <div class="channel-selector">
+                <button id="btnCh1" class="channel-btn active" data-channel="0">CH 1: Chords</button>
+                <button id="btnCh2" class="channel-btn" data-channel="1">CH 2: Bass</button>
+                <button id="btnCh3" class="channel-btn" data-channel="2">CH 3: Lead</button>
+            </div>
+
+            <div class="control-group" style="display: flex; gap: 10px; align-items: center; margin-bottom: 5px;">
+                <input type="text" id="chordStringInput" placeholder="Nuottiteksti..." autocomplete="off">
+                <button id="btnUpdateText" class="small-btn" title="Päivitä piano roll tekstin perusteella">Update from Text</button>
+                <button id="btnClear" class="small-btn danger">Clear Track</button>
+            </div>
+
+            <!-- Editointityökalut -->
+            <div class="edit-toolbar">
+                <span style="font-size: 0.8rem; color: #888; margin-right: 5px;">EDIT:</span>
+                <button id="btnMoveLeft" class="small-btn" title="Siirrä vasemmalle (Q)">Move &lt; (Q)</button>
+                <button id="btnMoveRight" class="small-btn" title="Siirrä oikealle (E)">Move &gt; (E)</button>
+                <div class="separator"></div>
+                <!-- Transponoi valittua (Pitch) -->
+                <button id="btnPitchUp" class="small-btn" title="Nosta sävelkorkeutta">Pitch ▲</button>
+                <button id="btnPitchDown" class="small-btn" title="Laske sävelkorkeutta">Pitch ▼</button>
+                <div class="separator"></div>
+                <button id="btnReplace" class="small-btn" title="Korvaa valittu">Replace</button>
+                <button id="btnDelete" class="small-btn danger" title="Poista valittu (D)">Delete (D)</button>
+                
+                <div class="separator"></div>
+                <!-- Generator Bass (Näkyy kun CH2 valittu) -->
+                <button id="btnGenBass" class="small-btn action-btn" style="display:none; background: #006064; border-color: #00838f;">GENERATE BASS</button>
+            </div>
+
+            <!-- Piano Roll Wrapper (Scrollattava) -->
+            <div class="piano-roll-wrapper" id="pianoRollWrapper">
+                <canvas id="pianoRollCanvas"></canvas>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- Ulkoiset skriptit: Järjestys on tärkeä -->
+    <script src="project-manager.js"></script>
+    <script src="midi-export.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>
