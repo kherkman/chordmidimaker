@@ -1,8 +1,7 @@
 /**
  * main.js
  * Chord Sequencer & Generator Logic
- * Updated: Multi-Track Support (Chords, Bass, Lead), Ghost Notes, Bass Generation.
- * KORJATTU VERSIO - Kanavanvaihto toimii
+ * Multi-Track Support (Chords, Bass, Lead), Ghost Notes, Bass Generation.
  */
 
 // --- KONFIGURAATIO JA VAKIOT ---
@@ -219,6 +218,13 @@ function scheduler() {
         State.channelTimes = [State.nextNoteTime, State.nextNoteTime, State.nextNoteTime];
     }
 
+    // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
+    const channelLengths = State.channels.map(ch => {
+        if (!ch || ch.length === 0) return 0;
+        return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
+    });
+    const maxChannelLength = Math.max(...channelLengths);
+    
     for (let ch = 0; ch < 3; ch++) {
         while (State.channelTimes[ch] < State.audioCtx.currentTime + CONFIG.scheduleAheadTime) {
             const seq = State.channels[ch];
@@ -233,7 +239,6 @@ function scheduler() {
                     if (step.notes.length > 0) {
                         step.notes.forEach(note => {
                             playSound(note, durationSeconds, State.channelTimes[ch], ch);
-                            // Lasketaan MIDI lähetys viive
                             const delay = (State.channelTimes[ch] - State.audioCtx.currentTime) * 1000;
                             if (delay > 0) {
                                 setTimeout(() => sendMidiNote(note, durationSeconds, ch), delay);
@@ -246,10 +251,27 @@ function scheduler() {
                     // Siirrä aikaa eteenpäin tämän kanavan osalta
                     State.channelTimes[ch] += durationSeconds;
                     
-                    // Seuraava askel
-                    State.channelIndices[ch]++;
-                    if (State.channelIndices[ch] >= seq.length) {
-                        State.channelIndices[ch] = 0;
+                    // TARKISTA LOOPPIPISTE (PISIN KANAVA)
+                    // Lasketaan tämän kanavan kuluneet beatit
+                    const currentBeats = (State.channelTimes[ch] - State.startTime) / (60.0 / State.bpm);
+                    
+                    // Jos olemme ylittäneet pisimmän kanavan pituuden,
+                    // nollataan kaikki kanavat takaisin alkuun
+                    if (currentBeats >= maxChannelLength) {
+                        // Resetoi kaikkien kanavien indeksit ja ajat
+                        for (let i = 0; i < 3; i++) {
+                            State.channelIndices[i] = 0;
+                            State.channelTimes[i] = State.startTime;
+                        }
+                        
+                        // Lähdetään uudelleen laskemaan pisimmästä kanavasta
+                        break;
+                    } else {
+                        // Normaali eteneminen
+                        State.channelIndices[ch]++;
+                        if (State.channelIndices[ch] >= seq.length) {
+                            State.channelIndices[ch] = 0;
+                        }
                     }
                 } else {
                     // Tyhjä askel
@@ -270,11 +292,53 @@ function scheduler() {
     }
 }
 
+function updatePlayingHighlight() {
+    if (!State.isPlaying) return;
+    
+    // Etsi kanava ja step joka on parhaillaan soimassa
+    for (let ch = 0; ch < 3; ch++) {
+        const seq = State.channels[ch];
+        if (!seq || seq.length === 0) continue;
+        
+        const secondsPerBeat = 60.0 / State.bpm;
+        const timeElapsed = State.audioCtx.currentTime - State.startTime;
+        
+        // Lasketaan pisimmän kanavan pituus
+        const channelLengths = State.channels.map(channel => {
+            if (!channel || channel.length === 0) return 0;
+            return channel.reduce((sum, s) => sum + (s.duration / 4), 0);
+        });
+        const maxChannelLength = Math.max(...channelLengths);
+        
+        // Loopattu aika
+        const currentBeats = (timeElapsed / secondsPerBeat) % maxChannelLength;
+        
+        // Etsi step joka on soimassa
+        let beatCounter = 0;
+        for (let i = 0; i < seq.length; i++) {
+            const stepBeats = seq[i].duration / 4;
+            if (currentBeats >= beatCounter && currentBeats < beatCounter + stepBeats) {
+                // Jos tämä on aktiivinen kanava, päivitä highlight
+                if (ch === State.activeChannel && i !== State.selectedStepIndex) {
+                    State.selectedStepIndex = i;
+                    highlightChordInText(i);
+                    return;
+                }
+                break;
+            }
+            beatCounter += stepBeats;
+        }
+    }
+}
+
+
 function animate() {
     if (!State.isPlaying) {
         drawPianoRoll(); 
         return;
     }
+    
+    updatePlayingHighlight(); // Päivitä highlight soivan stepin mukaan
     drawPianoRoll(); 
     State.animationId = requestAnimationFrame(animate);
 }
@@ -666,10 +730,13 @@ function highlightChordInText(index) {
     const input = document.getElementById('chordStringInput');
     const text = input.value;
     const parts = text.split(' - ');
+    
+    // Tarkista että index on voimassa
     if (index < 0 || index >= parts.length) return;
     
+    // Laske valinnan sijainti tekstissä
     let start = 0;
-    for (let i = 0; i < index; i++) start += parts[i].length + 3; 
+    for (let i = 0; i < index; i++) start += parts[i].length + 3; // " - " on 3 merkkiä
     let end = start + parts[index].length;
     
     input.focus();
@@ -897,26 +964,41 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
     
     let currentX = 0;
     
+    // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
+    const channelLengths = State.channels.map(ch => {
+        if (!ch || ch.length === 0) return 0;
+        return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
+    });
+    const maxChannelLength = Math.max(...channelLengths);
+    
     let currentSequenceTime = 0;
     if (State.isPlaying) {
         const secondsPerBeat = 60.0 / State.bpm;
         currentSequenceTime = (State.audioCtx.currentTime - State.startTime) / secondsPerBeat;
+        // TARKISTA LOOPPAUS
+        currentSequenceTime = currentSequenceTime % maxChannelLength;
     }
 
     sequence.forEach((step, index) => {
         const stepBeats = step.duration / 4;
         const stepWidth = stepBeats * CONFIG.pxPerBeat;
         
+        // TÄRKEÄ MUUTOS: Tarkista onko tämä step parhaillaan soimassa
+        const stepStartBeat = currentX / CONFIG.pxPerBeat;
+        const stepEndBeat = stepStartBeat + stepBeats;
+        
+        // KORJATTU EHTO: Käytä currentSequenceTimea joka on jo loopattu
+        const isPlayingNow = State.isPlaying && 
+                            (currentSequenceTime >= stepStartBeat && 
+                             currentSequenceTime < stepEndBeat);
+        
+        // PÄIVITÄ MYÖS VALITTU STEPIN KOROSTUS
         if (!isGhost && index === State.selectedStepIndex) {
             ctx.fillStyle = CONFIG.colors.selection;
             ctx.fillRect(currentX, 0, stepWidth, canvasHeight);
         }
         
-        const stepStartBeat = currentX / CONFIG.pxPerBeat;
-        const stepEndBeat = stepStartBeat + stepBeats;
-        const isPlayingNow = State.isPlaying && (currentSequenceTime >= stepStartBeat && currentSequenceTime < stepEndBeat);
-
-        // PIIRRÄ JOKAINEN NUOTTI ERIKKSEEN - TÄRKEÄ RAHAAMISTA VARTEN
+        // Piirrä jokainen nuotti
         step.notes.forEach((note, noteIndex) => {
             const y = (127 - note) * CONFIG.noteHeight;
             
@@ -924,37 +1006,26 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
                 ctx.fillStyle = hexToRgba(baseColor, 0.2);
                 ctx.fillRect(currentX, y + 1, stepWidth - 1, CONFIG.noteHeight - 2);
             } else {
-                // Käytä eri väriä nuotin sisällä oleville nuoteille
+                // KORJATTU: Soiva step saa eri värin
                 const noteColor = isPlayingNow ? 
                     adjustColorBrightness(baseColor, 40) : 
-                    adjustColorBrightness(baseColor, (noteIndex * -5)); // Hieman eri sävy jokaiselle nuotille
+                    adjustColorBrightness(baseColor, (noteIndex * -5));
                 
                 ctx.fillStyle = noteColor;
                 ctx.fillRect(currentX, y + 1, stepWidth - 1, CONFIG.noteHeight - 2);
                 
-                // Lisää tumma reuna jotta nuotit näkyvät erillisinä
                 ctx.strokeStyle = adjustColorBrightness(baseColor, -30);
                 ctx.lineWidth = 1;
                 ctx.strokeRect(currentX, y + 1, stepWidth - 1, CONFIG.noteHeight - 2);
-                
-                // Pienet kirjaimet nuottien sisällä (ei päivity siirtäessä!)
-                // if (step.notes.length > 1) {
-                //     ctx.fillStyle = '#fff';
-                //     ctx.font = '8px sans-serif';
-                //     
-                //     // Käytä noteNames-taulukkoa jos se on olemassa
-                //     const noteName = step.noteNames && step.noteNames[noteIndex] ? 
-                //         step.noteNames[noteIndex] : 
-                //         NOTE_NAMES[step.notes[noteIndex] % 12].charAt(0);
-                //     
-                //     ctx.fillText(
-                //         noteName,
-                //         currentX + 2, 
-                //         y + CONFIG.noteHeight - 3
-                //     );
-                // }
             }
         });
+        
+        // Lisää extra-korostus soivalle stepille (valinnainen)
+        if (isPlayingNow && !isGhost) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(currentX + 1, 1, stepWidth - 2, canvasHeight - 2);
+        }
         
         if (!isGhost) {
             // Pystyviiva stepin lopussa
@@ -971,18 +1042,34 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
 
 function drawPlayhead(ctx, height, totalBeats, wrapper) {
     let playheadX = -1;
+    
     if (State.isPlaying) {
         const secondsPerBeat = 60.0 / State.bpm;
         const timeElapsed = State.audioCtx.currentTime - State.startTime;
-        playheadX = (timeElapsed / secondsPerBeat) * CONFIG.pxPerBeat;
+        
+        // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
+        const channelLengths = State.channels.map(ch => {
+            if (!ch || ch.length === 0) return 0;
+            return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
+        });
+        const maxChannelLength = Math.max(...channelLengths);
+        
+        // Laske playhead-position modulo pisimmän kanavan pituudella
+        const currentBeats = timeElapsed / secondsPerBeat;
+        const loopedBeats = currentBeats % maxChannelLength;
+        playheadX = loopedBeats * CONFIG.pxPerBeat;
+        
     } else if (State.selectedStepIndex !== -1) {
         const seq = getActiveSequence();
         let beats = 0;
-        for(let i = 0; i < State.selectedStepIndex && i < seq.length; i++) beats += seq[i].duration / 4;
+        for(let i = 0; i < State.selectedStepIndex && i < seq.length; i++) {
+            beats += seq[i].duration / 4;
+        }
         playheadX = beats * CONFIG.pxPerBeat;
     }
 
     if (playheadX >= 0) {
+        // Piirrä playhead
         ctx.strokeStyle = CONFIG.colors.playhead;
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -990,12 +1077,32 @@ function drawPlayhead(ctx, height, totalBeats, wrapper) {
         ctx.lineTo(playheadX, height);
         ctx.stroke();
         
-        if (State.isPlaying) {
+        // Piirrä myös looppipiste (punainen viiva pisimmän kanavan lopussa)
+        const channelLengths = State.channels.map(ch => {
+            if (!ch || ch.length === 0) return 0;
+            return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
+        });
+        const maxChannelLength = Math.max(...channelLengths);
+        const loopEndX = maxChannelLength * CONFIG.pxPerBeat;
+        
+        if (loopEndX > 0 && loopEndX < ctx.canvas.width) {
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]); // Katkoviiva
+            ctx.beginPath();
+            ctx.moveTo(loopEndX, 0);
+            ctx.lineTo(loopEndX, height);
+            ctx.stroke();
+            ctx.setLineDash([]); // Nollaa katkoviiva
+        }
+        
+        // Autoscroll playheadin mukana
+        if (State.isPlaying && wrapper) {
             const wRect = wrapper.getBoundingClientRect();
             if (playheadX > wrapper.scrollLeft + wRect.width - 50) {
-                 wrapper.scrollLeft = playheadX - 50;
+                wrapper.scrollLeft = playheadX - 50;
             } else if (playheadX < wrapper.scrollLeft) {
-                 wrapper.scrollLeft = playheadX - 50;
+                wrapper.scrollLeft = playheadX - 50;
             }
         }
     }
