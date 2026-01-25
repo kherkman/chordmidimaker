@@ -629,6 +629,120 @@ function generateBassTrack() {
     drawPianoRoll();
 }
 
+// --- LEAD GENERATION (NEW) ---
+
+function generateLeadTrack() {
+    // Generoi lead-raita Channel 2 (Lead) Channel 0 (Chords) perusteella.
+    const chords = State.channels[0];
+    const leadTrack = [];
+    
+    if (!chords || chords.length === 0) {
+        alert("Luo ensin sointuja kanavalle 1 (Chords).");
+        return;
+    }
+
+    chords.forEach(step => {
+        const stepBeats = step.duration / 4; // Beat-määrä tässä soinnussa
+        
+        if (step.notes.length === 0) {
+            // Jos sointu on tauko, generoi sama tauko leadille
+            leadTrack.push({
+                notes: [],
+                duration: step.duration,
+                name: "Pause"
+            });
+            return;
+        }
+
+        // Määrittele mahdolliset lead-asetukset
+        const maxLeadNotes = 4; // Maksimi lead-nuotteja per sointu
+        const minLeadNotes = 1; // Minimi lead-nuotteja per sointu
+        
+        // Satunnainen määrä lead-nuotteja tälle soinnulle (1-4)
+        const numLeadNotes = Math.floor(Math.random() * (maxLeadNotes - minLeadNotes + 1)) + minLeadNotes;
+        
+        // Laske kunkin lead-osuuden kesto
+        const noteDurations = distributeBeatsRandomly(stepBeats, numLeadNotes);
+        
+        // Käytä sointuun kuuluvia säveliä (sama oktaavi tai 1 oktaavi ylempänä)
+        const chordNotes = [...step.notes];
+        
+        // Lisää oktaavi ylempänä olevat säveleet vaihtoehdoiksi
+        const higherOctaveNotes = chordNotes.map(note => note + 12);
+        const availableNotes = [...chordNotes, ...higherOctaveNotes].filter(note => note <= 84); // Älä mene liian korkealle
+        
+        for (let i = 0; i < numLeadNotes; i++) {
+            const noteDuration = noteDurations[i] * 4; // Muunna takaisin duration-muotoon
+            
+            // 30% mahdollisuus taukoon kussakin lead-osassa
+            const isPause = Math.random() < 0.3;
+            
+            if (isPause) {
+                leadTrack.push({
+                    notes: [],
+                    duration: noteDuration,
+                    name: "Pause"
+                });
+            } else {
+                // Valitse satunnainen sävel saatavilla olevista
+                const randomNote = availableNotes[Math.floor(Math.random() * availableNotes.length)];
+                
+                // 20% mahdollisuus että käytetään sama nuotti kuin edellisessä (jos sellainen on)
+                const useSameNote = (leadTrack.length > 0 && 
+                                     leadTrack[leadTrack.length - 1].notes.length > 0 &&
+                                     Math.random() < 0.2);
+                
+                let noteToUse;
+                if (useSameNote) {
+                    noteToUse = leadTrack[leadTrack.length - 1].notes[0];
+                } else {
+                    noteToUse = randomNote;
+                }
+                
+                leadTrack.push({
+                    notes: [noteToUse],
+                    duration: noteDuration,
+                    name: NOTE_NAMES[noteToUse % 12] + (Math.floor(noteToUse/12)-1)
+                });
+            }
+        }
+    });
+
+    State.channels[2] = leadTrack;
+    drawPianoRoll();
+}
+
+// Apufunktio: Jaa beatit satunnaisesti annettuun määrään osuuksia
+function distributeBeatsRandomly(totalBeats, numParts) {
+    const parts = [];
+    
+    // Alustaa jokaiselle osalle vähintään 0.25 beat (1/16 nuotti)
+    for (let i = 0; i < numParts; i++) {
+        parts.push(0.25);
+    }
+    
+    // Loput beatit jaetaan satunnaisesti
+    let remainingBeats = totalBeats - (0.25 * numParts);
+    
+    while (remainingBeats > 0) {
+        // Valitse satunnainen osa
+        const randomPart = Math.floor(Math.random() * numParts);
+        // Lisää satunnainen määrä (0.25, 0.5 tai 1 beat)
+        const toAdd = Math.random() < 0.33 ? 0.25 : (Math.random() < 0.5 ? 0.5 : 1);
+        
+        if (remainingBeats >= toAdd) {
+            parts[randomPart] += toAdd;
+            remainingBeats -= toAdd;
+        } else {
+            parts[randomPart] += remainingBeats;
+            remainingBeats = 0;
+        }
+    }
+    
+    // Varmista ettei yksittäiset osat ole liian pitkiä
+    return parts.map(beats => Math.min(beats, 2)); // Maksimi 2 beat per osa
+}
+
 // --- EDITING & MANIPULATION ---
 
 function getActiveSequence() {
@@ -1556,10 +1670,16 @@ function updateChannelUI() {
         btn.classList.toggle('active', channel === State.activeChannel);
     });
     
-    // Näytä/piilota Generoi Basso -nappi
+    // Näytä/piilota Generoi Basso ja Generoi Lead -napit
     const btnGenBass = document.getElementById('btnGenBass');
+    const btnGenLead = document.getElementById('btnGenLead');
+    
     if (btnGenBass) {
         btnGenBass.style.display = (State.activeChannel === 1) ? 'inline-block' : 'none';
+    }
+    
+    if (btnGenLead) {
+        btnGenLead.style.display = (State.activeChannel === 2) ? 'inline-block' : 'none';
     }
     
     // Päivitä kanavan nimi näkyviin
@@ -1951,6 +2071,22 @@ function setupChannelControls() {
         btnGenBass.style.display = 'none';
         
         channelContainer.appendChild(btnGenBass);
+
+        // LISÄÄ TÄMÄ: Generoi Lead -nappi
+        const btnGenLead = document.createElement('button');
+        btnGenLead.id = 'btnGenLead';
+        btnGenLead.className = 'small-btn';
+        btnGenLead.textContent = 'Generate Lead from Chords';
+        btnGenLead.style.marginTop = '10px';
+        btnGenLead.style.backgroundColor = CONFIG.colors.ch2; // Oranssi lead-kanavalle
+        btnGenLead.style.color = '#fff';
+        btnGenLead.style.border = 'none';
+        btnGenLead.style.padding = '6px 12px';
+        btnGenLead.style.borderRadius = '4px';
+        btnGenLead.style.cursor = 'pointer';
+        btnGenLead.style.display = 'none';
+        
+        channelContainer.appendChild(btnGenLead);
         
         // Lisää kontrollit sivulle
         const controlsSection = document.querySelector('.controls');
@@ -1975,6 +2111,12 @@ function setupChannelControls() {
     const btnGenBass = document.getElementById('btnGenBass');
     if (btnGenBass) {
         btnGenBass.addEventListener('click', generateBassTrack);
+    }
+
+    // Lisää event listener Generoi Lead -napille
+    const btnGenLead = document.getElementById('btnGenLead');
+    if (btnGenLead) {
+        btnGenLead.addEventListener('click', generateLeadTrack);
     }
 }
 
