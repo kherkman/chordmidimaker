@@ -416,6 +416,27 @@ button.dimmed:hover {
 .channel-btn[data-channel="1"].active { color: #00bcd4; border-top-color: #00bcd4; } /* Cyan for Bass */
 .channel-btn[data-channel="2"].active { color: #ff9800; border-top-color: #ff9800; } /* Orange for Lead */
 
+/* Kanavakohtaiset värit edit-toolbar napeille */
+#btnGenBass {
+    background: #006064;
+    border-color: #00838f;
+}
+#btnGenBass:hover {
+    background: #00838f;
+}
+
+#btnGenLead {
+    background: #e65100;
+    border-color: #ff9800;
+}
+#btnGenLead:hover {
+    background: #ff9800;
+    color: #000;
+}
+
+
+/* Chord String Input */
+
 #chordStringInput {
     flex-grow: 1;
     background: #000;
