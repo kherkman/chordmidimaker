@@ -94,8 +94,8 @@ h3, h4 {
 .top-bar {
     display: flex;
     flex-wrap: wrap;
-    gap: 15px;
-    padding-bottom: 20px;
+    gap: 10px; 
+    padding-bottom: 15px;
     border-bottom: 1px solid var(--border-color);
     align-items: center;
     justify-content: space-between;
@@ -139,6 +139,55 @@ select {
     padding: 6px;
     border-radius: var(--radius-sm);
     cursor: pointer;
+}
+
+/* Volume Controls */
+.volume-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-input);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid #333;
+    min-width: 180px;
+}
+
+#volumeSlider {
+    flex-grow: 1;
+    width: 80px;
+    height: 6px;
+    background: #333;
+    border-radius: 3px;
+    outline: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+}
+
+#volumeSlider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    cursor: pointer;
+    border: 2px solid #fff;
+}
+
+#volumeSlider::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    cursor: pointer;
+    border: 2px solid #fff;
+}
+
+#volumeValue {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    min-width: 35px;
+    text-align: right;
 }
 
 /* --- BUTTONS GENERAL --- */
@@ -308,6 +357,13 @@ button.dimmed:hover {
     .root-grid { grid-template-columns: repeat(6, 1fr); }
     .pause-btn { grid-column: span 1; }
     #durButtons, #invButtons { grid-template-columns: repeat(4, 1fr) !important; }
+    .volume-controls {
+        min-width: 140px;
+    }
+    
+    .top-bar {
+        gap: 8px;
+    }
 }
 
 .pause-btn {
@@ -486,4 +542,47 @@ button.dimmed:hover {
 }
 canvas {
     display: block;
+}
+
+/* Kosketusystävälliset painikkeet */
+button {
+    min-height: 44px; /* iOS:n suositus */
+    touch-action: manipulation; /* Estä zoomaus ja vieritys */
+}
+
+/* Suurennetaan pienempien nappien kokoja kosketusta varten */
+.small-btn {
+    min-height: 36px;
+    min-width: 36px;
+}
+
+/* Canvas kosketuksille */
+#pianoRollCanvas {
+    touch-action: none; /* Salli kaikki touch-toiminnot canvasilla */
+}
+
+/* Estä tekstin valinta kosketuksella */
+* {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Input-kentille salli valinta */
+input, textarea {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* Paranna kosketuspaljastusta */
+@media (hover: none) and (pointer: coarse) {
+    button:hover {
+        background-color: inherit; /* Poista hover-mobiilissa */
+    }
+    
+    button:active {
+        transform: scale(0.98);
+        opacity: 0.8;
+    }
 }
