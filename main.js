@@ -72,6 +72,9 @@ const State = {
     isPlaying: false,
     startTime: 0, 
     nextNoteTime: 0.0,
+
+    // VOLUME
+    masterVolume: 0.8, // 0-1, oletus 0.8 (80%)
     
     // Sekvensserin tila
     channelTimes: null,
@@ -139,7 +142,7 @@ function playSound(midiNote, durationTime, startTime, channelIndex) {
     const source = State.audioCtx.createBufferSource();
     source.buffer = buffer;
     
-    // Pitch shift (Base C4 = 60 kaikille sampleille oletuksena)
+    // Pitch shift
     const playbackRate = Math.pow(2, (finalNote - 60) / 12);
     source.playbackRate.value = playbackRate;
     
@@ -154,13 +157,14 @@ function playSound(midiNote, durationTime, startTime, channelIndex) {
     const attack = 0.02;
     const release = 0.05;
     
-    // Envelope
+    // Envelope + Master Volume
+    const gainValue = 0.8 * State.masterVolume; // Oletusgain * master volume
     gainNode.gain.setValueAtTime(0, startTime);
-    gainNode.gain.linearRampToValueAtTime(0.8, startTime + attack);
+    gainNode.gain.linearRampToValueAtTime(gainValue, startTime + attack);
     
     const stopTime = startTime + durationTime;
     if (stopTime > startTime) {
-        gainNode.gain.setValueAtTime(0.8, Math.max(startTime + attack, stopTime - release));
+        gainNode.gain.setValueAtTime(gainValue, Math.max(startTime + attack, stopTime - release));
         gainNode.gain.linearRampToValueAtTime(0, stopTime);
         
         source.start(startTime);
@@ -1288,20 +1292,21 @@ function initCanvasEvents() {
 
     let dragStartParams = null;
     let isDraggingNote = false;
+    let activeTouchId = null; // Uusi: seurataan aktiivista kosketusta
 
-    canvas.addEventListener('mousedown', (e) => {
+    // Yhteinen klikkaus/kosketus-funktio
+    function handlePointerStart(clientX, clientY, isTouch = false) {
         const rect = canvas.getBoundingClientRect();
         
-        // OIKEA KOORDINAATTIEN LASKENTA:
-        // 1. Laske klikkaus canvasin sisällä (ilman scrollia)
-        const canvasX = e.clientX - rect.left;
-        const canvasY = e.clientY - rect.top;
+        // Laske koordinaatit
+        const canvasX = clientX - rect.left;
+        const canvasY = clientY - rect.top;
         
-        // 2. Huomioi wrapperin scrollaus
+        // Huomioi wrapperin scrollaus
         const x = canvasX + wrapper.scrollLeft;
         const y = canvasY + wrapper.scrollTop;
         
-        console.log("Click at:", { canvasX, canvasY, x, y, scrollLeft: wrapper.scrollLeft, scrollTop: wrapper.scrollTop });
+        console.log(`${isTouch ? 'Touch' : 'Click'} at:`, { canvasX, canvasY, x, y });
         
         const seq = getActiveSequence();
         let scanX = 0;
@@ -1333,7 +1338,8 @@ function initCanvasEvents() {
                             note: clickedMidi, 
                             startY: canvasY, // TÄRKEÄ: käytä canvasY, ei y
                             noteIndex: step.notes.indexOf(clickedMidi),
-                            stepStartX: scanX
+                            stepStartX: scanX,
+                            isTouch: isTouch
                         };
                         break;
                     }
@@ -1346,13 +1352,15 @@ function initCanvasEvents() {
             // Raahataan yksittäistä nuottia
             isDraggingNote = true;
             dragStartParams = found;
-            canvas.style.cursor = 'grabbing';
+            canvas.style.cursor = isTouch ? 'grabbing' : 'pointer';
             
             console.log("Dragging note:", found.note, "in step", found.stepIndex);
             
             // Soita nuotti previewna
             playSound(found.note, 0.2, State.audioCtx.currentTime, State.activeChannel);
-            e.preventDefault();
+            
+            // Palauttaa true, jotta preventDefault voidaan kutsua
+            return true;
         } else if (clickedStepIndex !== -1) {
             // Valitaan koko sointu
             isDraggingNote = false;
@@ -1367,20 +1375,23 @@ function initCanvasEvents() {
             if (step.notes.length > 0) {
                 playSound(step.notes[0], 0.1, State.audioCtx.currentTime, State.activeChannel);
             }
+            
+            return true;
         } else {
             // Klikattu tyhjää - poista valinta
             isDraggingNote = false;
             State.selectedStepIndex = -1;
             drawPianoRoll();
+            return true;
         }
-    });
-    
-    // Nuotin raahauslogiikka
-    window.addEventListener('mousemove', (e) => {
+    }
+
+    // Yhteinen raahaus-funktio
+    function handlePointerMove(clientX, clientY) {
         if (!dragStartParams || !isDraggingNote) return;
         
-        const canvasRect = canvas.getBoundingClientRect();
-        const canvasY = e.clientY - canvasRect.top;
+        const rect = canvas.getBoundingClientRect();
+        const canvasY = clientY - rect.top;
         
         const diffPx = dragStartParams.startY - canvasY;
         const diffSemi = Math.round(diffPx / CONFIG.noteHeight);
@@ -1421,17 +1432,110 @@ function initCanvasEvents() {
                 playSound(newNote, 0.1, State.audioCtx.currentTime, State.activeChannel);
             }
         }
-    });
-    
-    window.addEventListener('mouseup', () => {
+    }
+
+    // Yhteinen päätös-funktio
+    function handlePointerEnd() {
         if (dragStartParams && isDraggingNote) {
             console.log("Finished dragging note");
         }
         
         isDraggingNote = false;
         dragStartParams = null;
+        activeTouchId = null;
         canvas.style.cursor = 'default';
+    }
+
+    // --- HIIRI-TAPAHTUMAT ---
+    canvas.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return; // Vain vasen hiiren nappi
+        if (handlePointerStart(e.clientX, e.clientY, false)) {
+            e.preventDefault();
+        }
     });
+    
+    window.addEventListener('mousemove', (e) => {
+        handlePointerMove(e.clientX, e.clientY);
+    });
+    
+    window.addEventListener('mouseup', handlePointerEnd);
+
+    // --- TOUCH-TAPAHTUMAT ---
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+            const touch = e.touches[0];
+            activeTouchId = touch.identifier;
+            
+            if (handlePointerStart(touch.clientX, touch.clientY, true)) {
+                e.preventDefault();
+            }
+            
+            // Visual feedback
+            canvas.style.opacity = '0.95';
+        }
+    }, { passive: false });
+    
+    canvas.addEventListener('touchmove', (e) => {
+        if (activeTouchId !== null && e.touches.length === 1) {
+            const touch = e.touches[0];
+            if (touch.identifier === activeTouchId) {
+                handlePointerMove(touch.clientX, touch.clientY);
+                
+                // Estä sivun vieritys canvas-alueella
+                if (!State.isPlaying) {
+                    e.preventDefault();
+                }
+            }
+        }
+    }, { passive: false });
+    
+    canvas.addEventListener('touchend', (e) => {
+        if (activeTouchId !== null) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                if (e.changedTouches[i].identifier === activeTouchId) {
+                    handlePointerEnd();
+                    canvas.style.opacity = '';
+                    e.preventDefault();
+                    break;
+                }
+            }
+        }
+    }, { passive: false });
+    
+    canvas.addEventListener('touchcancel', (e) => {
+        handlePointerEnd();
+        canvas.style.opacity = '';
+    });
+
+    // Tarkista onko touch-laitteessa
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    
+    if (isTouchDevice) {
+        console.log("Touch device detected, optimizing for touch...");
+        
+        // Suurennetaan klikkausalueita piano rollissa
+        canvas.style.cursor = 'pointer';
+        
+        // Lisää myös wrapperiin estä vieritys kosketuksella (vain ei-soitotilassa)
+        wrapper.addEventListener('touchmove', (e) => {
+            if (!State.isPlaying) {
+                // Estä oletusvieritys canvas-alueella
+                e.preventDefault();
+            }
+        }, { passive: false });
+        
+        // Paranna kosketusresponsiivisuutta
+        canvas.style.touchAction = 'none'; // Salli kaikki touch-toiminnot
+        
+        // Estä zoomaus canvas-alueella
+        canvas.addEventListener('gesturestart', (e) => {
+            e.preventDefault();
+        });
+        
+        canvas.addEventListener('gesturechange', (e) => {
+            e.preventDefault();
+        });
+    }
 }
 
 function identifyChord(notes) {
@@ -1733,6 +1837,36 @@ function init() {
             console.log('MIDI Output status:', State.midiOutput.state);
         }
     }, 5000);
+
+    // VOLUME SLIDER
+    const volumeSlider = document.getElementById('volumeSlider');
+    const volumeValue = document.getElementById('volumeValue');
+    
+    if (volumeSlider && volumeValue) {
+        // Päivitä sliderin arvo Stateen
+        State.masterVolume = volumeSlider.value / 100;
+        
+        volumeSlider.addEventListener('input', (e) => {
+            const value = e.target.value;
+            State.masterVolume = value / 100;
+            volumeValue.textContent = `${value}%`;
+            
+            // Testaa volumea soittamalla preview-nuotin
+            if (State.selectedRoot !== null && State.selectedRoot !== 'pause') {
+                const previewNotes = getMidiNotes(State.selectedRoot, State.selectedType, State.selectedOctave, State.selectedInv);
+                if (previewNotes.length > 0) {
+                    playSound(previewNotes[0], 0.1, State.audioCtx.currentTime, State.activeChannel);
+                }
+            }
+        });
+        
+        // Nopea reset - klikkaa prosenttia palauttaaksesi 100%
+        volumeValue.addEventListener('click', () => {
+            volumeSlider.value = 100;
+            State.masterVolume = 1.0;
+            volumeValue.textContent = '100%';
+        });
+    }
     
     // Color Picker
     const colorPicker = document.createElement('input');
