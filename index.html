@@ -25,6 +25,13 @@
                 <button id="btnTap" class="small-btn">TAP</button>
             </div>
 
+            <!-- VOLUME SLIDER -->
+            <div class="volume-controls">
+                <label for="volumeSlider">Vol:</label>
+                <input type="range" id="volumeSlider" min="0" max="100" value="80" title="Master Volume">
+                <span id="volumeValue">80%</span>
+            </div>
+
             <!-- Transpose & Color (Värivalitsin lisätään tähän JS:llä) -->
             <div class="transpose-controls">
                 <button id="btnTransDown" class="small-btn">▼</button>
@@ -242,6 +249,7 @@
     </div>
 
     <!-- Ulkoiset skriptit: Järjestys on tärkeä -->
+    <script src="touch-events.js"></script>
     <script src="project-manager.js"></script>
     <script src="midi-export.js"></script>
     <script src="main.js"></script>
