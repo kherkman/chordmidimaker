@@ -89,7 +89,7 @@ const State = {
     selectedRoot: null, 
     selectedType: 'maj',
     selectedInv: 0,
-    selectedDur: 4, // 4 = 1 beat
+    selectedDur: 8, // 4 = 1 beat
     
     // Editointi tila
     selectedStepIndex: -1, // Kohdistuu aina activeChanneliin
@@ -201,14 +201,39 @@ function onMIDIFailure() {
 function sendMidiNote(note, durationTime, channel) {
     if (!State.midiOutput) return;
     const finalNote = note + State.transpose;
+    
     // MIDI Channel: 0x90 = Ch1, 0x91 = Ch2, 0x92 = Ch3
     const noteOnStatus = 0x90 + channel;
     const noteOffStatus = 0x80 + channel;
     
+    // Lähetä note on heti
     State.midiOutput.send([noteOnStatus, finalNote, 100]);
-    setTimeout(() => {
-        State.midiOutput.send([noteOffStatus, finalNote, 0]);
-    }, durationTime * 1000);
+    
+    // Täsmällinen aikataulutus note off:lle Web Audio API:n avulla
+    const stopTime = State.audioCtx.currentTime + durationTime;
+    
+    // Luo aikatauluttu note off
+    const scheduleNoteOff = () => {
+        const now = State.audioCtx.currentTime;
+        if (now >= stopTime) {
+            State.midiOutput.send([noteOffStatus, finalNote, 0]);
+        } else {
+            // Käytä setTimeout vain jos audio context on suspended
+            if (State.audioCtx.state === 'suspended') {
+                setTimeout(() => {
+                    State.midiOutput.send([noteOffStatus, finalNote, 0]);
+                }, (stopTime - now) * 1000);
+            } else {
+                // Käytä audio contextin schedule-tarkkuutta
+                setTimeout(() => {
+                    State.midiOutput.send([noteOffStatus, finalNote, 0]);
+                }, (stopTime - now) * 1000);
+            }
+        }
+    };
+    
+    // Suorita note off
+    scheduleNoteOff();
 }
 
 // --- SEQUENCER LOGIC ---
@@ -218,6 +243,13 @@ function scheduler() {
         State.channelTimes = [State.nextNoteTime, State.nextNoteTime, State.nextNoteTime];
     }
 
+    // Debug-tietoja
+    const debugInfo = {
+        channelTimes: State.channelTimes.map(t => t.toFixed(3)),
+        currentTime: State.audioCtx ? State.audioCtx.currentTime.toFixed(3) : 'N/A',
+        channelIndices: [...State.channelIndices]
+    };
+    
     // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
     const channelLengths = State.channels.map(ch => {
         if (!ch || ch.length === 0) return 0;
@@ -237,46 +269,27 @@ function scheduler() {
                     const durationSeconds = (60.0 / State.bpm) * beats;
                     
                     if (step.notes.length > 0) {
+                        console.log(`MIDI Channel ${ch}: Playing step ${idx}, ${step.notes.length} notes`);
                         step.notes.forEach(note => {
                             playSound(note, durationSeconds, State.channelTimes[ch], ch);
-                            const delay = (State.channelTimes[ch] - State.audioCtx.currentTime) * 1000;
-                            if (delay > 0) {
-                                setTimeout(() => sendMidiNote(note, durationSeconds, ch), delay);
-                            } else {
-                                sendMidiNote(note, durationSeconds, ch);
-                            }
+                            
+                            // MIDI-lähetys suoraan ilman delaya
+                            sendMidiNote(note, durationSeconds, ch);
                         });
+                    } else {
+                        console.log(`MIDI Channel ${ch}: Empty step ${idx}`);
                     }
                     
                     // Siirrä aikaa eteenpäin tämän kanavan osalta
                     State.channelTimes[ch] += durationSeconds;
                     
-                    // TARKISTA LOOPPIPISTE (PISIN KANAVA)
-                    // Lasketaan tämän kanavan kuluneet beatit
-                    const currentBeats = (State.channelTimes[ch] - State.startTime) / (60.0 / State.bpm);
+                    // Kasvata indeksiä
+                    State.channelIndices[ch] = (idx + 1) % seq.length;
                     
-                    // Jos olemme ylittäneet pisimmän kanavan pituuden,
-                    // nollataan kaikki kanavat takaisin alkuun
-                    if (currentBeats >= maxChannelLength) {
-                        // Resetoi kaikkien kanavien indeksit ja ajat
-                        for (let i = 0; i < 3; i++) {
-                            State.channelIndices[i] = 0;
-                            State.channelTimes[i] = State.startTime;
-                        }
-                        
-                        // Lähdetään uudelleen laskemaan pisimmästä kanavasta
-                        break;
-                    } else {
-                        // Normaali eteneminen
-                        State.channelIndices[ch]++;
-                        if (State.channelIndices[ch] >= seq.length) {
-                            State.channelIndices[ch] = 0;
-                        }
-                    }
                 } else {
                     // Tyhjä askel
                     State.channelTimes[ch] += 0.1;
-                    State.channelIndices[ch]++;
+                    State.channelIndices[ch] = (State.channelIndices[ch] + 1) % seq.length;
                 }
             } else {
                 State.channelTimes[ch] += 0.5; // Idle
@@ -349,12 +362,26 @@ function togglePlay() {
     if (!State.buffers[0]) initAudio();
     if (State.audioCtx && State.audioCtx.state === 'suspended') State.audioCtx.resume();
     
+    const inputField = document.getElementById('chordStringInput');
+    
+    // Jos pysäytetään, lähetä MIDI all notes off
+    if (State.isPlaying && State.midiOutput) {
+        for (let ch = 0; ch < 3; ch++) {
+            State.midiOutput.send([0xB0 + ch, 123, 0]); // All Notes Off
+        }
+    }
+    
     State.isPlaying = !State.isPlaying;
     const btn = document.getElementById('btnPlay');
     
     if (State.isPlaying) {
         btn.innerHTML = "⏸ Pause";
         btn.classList.add('selected');
+        
+        // Estä syöttö soittotilassa
+        inputField.readOnly = true;
+        inputField.style.backgroundColor = '#222';
+        inputField.style.cursor = 'default';
         
         // Reset counters
         State.channelIndices = [0, 0, 0];
@@ -384,8 +411,19 @@ function togglePlay() {
     } else {
         btn.innerHTML = "▶ Play";
         btn.classList.remove('selected');
+        
+        // Salli syöttö uudelleen pysäytys-tilassa
+        inputField.readOnly = false;
+        inputField.style.backgroundColor = '';
+        inputField.style.cursor = 'text';
+        
+        // Nollataan kaikki soittotilat
+        State.channelIndices = [0, 0, 0];
+        State.channelTimes = null;
+        State.nextNoteTime = 0.0;
+        
         if (State.animationId) cancelAnimationFrame(State.animationId);
-        drawPianoRoll(); 
+        drawPianoRoll();
     }
 }
 
@@ -395,7 +433,23 @@ function stopPlay() {
     btn.innerHTML = "▶ Play";
     btn.classList.remove('selected');
     
+    // Salli syöttö uudelleen
+    const inputField = document.getElementById('chordStringInput');
+    inputField.readOnly = false;
+    inputField.style.backgroundColor = '';
+    inputField.style.cursor = 'text';
+    
     State.channelIndices = [0, 0, 0];
+    
+    // LÄHETÄ MIDI ALL NOTES OFF KAIKILLA KANAVILLA
+    if (State.midiOutput) {
+        for (let ch = 0; ch < 3; ch++) {
+            // MIDI Control Change 123 = All Notes Off
+            State.midiOutput.send([0xB0 + ch, 123, 0]);
+            // Tarkista myös note off kaikille kanaville
+            State.midiOutput.send([0x80 + ch, 0, 0]); // Note off for note 0 (ei välttämättä tarpeen)
+        }
+    }
     
     if (State.animationId) cancelAnimationFrame(State.animationId);
     drawPianoRoll();
@@ -1356,8 +1410,32 @@ function transposeAllNotes(semitones) {
 
 function initKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
-        if (e.target.tagName === 'INPUT') return;
+        // ESTÄ VÄLILYÖNNIN OIKEUDET AIKAISESTI
+        if (e.code === 'Space') {
+            e.preventDefault(); // ESTÄ VÄLILYÖNNIN OIKEUDET AIKAISESTI
+            togglePlay();
+            return;
+        }
+        
+        // 'S' PAINAKE SOITON PYSÄYTYKSESSÄ
+        if (e.code === 'KeyS') {
+            e.preventDefault();
+            stopPlay();
+            return;
+        }
 
+        // NÄMÄ TOIMINNOT VAIN KUN SOITTO EI OLE KÄYNNISSÄ
+        // TAI KUN TEKSTIKENTTÄ EI OLE AKTIIVINEN
+        const inputField = document.getElementById('chordStringInput');
+        const isInputActive = document.activeElement === inputField;
+        
+        // Jos soitto on käynnissä JA tekstikenttä on aktiivisessa fokuksessa,
+        // estä muut näppäinlyhenteet (paitsi Space ja S jotka käsiteltiin jo yllä)
+        if (State.isPlaying && isInputActive) {
+            return;
+        }
+        
+        // Normaali logiikka jatkuu
         const rootMap = {
             'Digit1': 0, 'Digit2': 1, 'Digit3': 2, 'Digit4': 3, 'Digit5': 4, 'Digit6': 5, 
             'Digit7': 6, 'Digit8': 7, 'Digit9': 8, 'Digit0': 9, 'KeyI': 10, 'KeyO': 11, 'KeyP': 'pause'
@@ -1374,19 +1452,39 @@ function initKeyboardShortcuts() {
         }
 
         switch(e.code) {
-            case 'Space': e.preventDefault(); togglePlay(); break;
-            case 'KeyS': stopPlay(); break;
-            case 'KeyA': addChordToSequence(); 
+            // Space ja S on jo käsitelty
+            case 'KeyA': 
+                // Estä 'A' kirjoittamasta tekstikenttään
+                e.preventDefault();
+                addChordToSequence(); 
                 const btnA = document.getElementById('btnAddChord'); 
                 btnA.style.borderColor = '#fff'; 
                 setTimeout(() => btnA.style.borderColor = '', 100); 
                 break;
-            case 'KeyR': document.getElementById('btnRnd').click(); break;
-            case 'KeyD': deleteSelection(); break;
-            case 'ArrowLeft': e.preventDefault(); moveSelection(-1); break;
-            case 'ArrowRight': e.preventDefault(); moveSelection(1); break;
-            case 'KeyQ': e.preventDefault(); moveSelection(-1); break;
-            case 'KeyE': e.preventDefault(); moveSelection(1); break;
+            case 'KeyR': 
+                e.preventDefault();
+                document.getElementById('btnRnd').click(); 
+                break;
+            case 'KeyD': 
+                e.preventDefault();
+                deleteSelection(); 
+                break;
+            case 'ArrowLeft': 
+                e.preventDefault(); 
+                moveSelection(-1); 
+                break;
+            case 'ArrowRight': 
+                e.preventDefault(); 
+                moveSelection(1); 
+                break;
+            case 'KeyQ': 
+                e.preventDefault(); 
+                moveSelection(-1); 
+                break;
+            case 'KeyE': 
+                e.preventDefault(); 
+                moveSelection(1); 
+                break;
             case 'KeyZ': 
                 e.preventDefault(); 
                 if (State.selectedStepIndex !== -1) {
@@ -1399,12 +1497,27 @@ function initKeyboardShortcuts() {
                     shiftSelectionPitch(1);
                 }
                 break;
-            case 'Digit1': if (e.ctrlKey) changeChannel(0); break;
-            case 'Digit2': if (e.ctrlKey) changeChannel(1); break;
-            case 'Digit3': if (e.ctrlKey) changeChannel(2); break;
-            // pikanäppäimet kaikkien nuottien transponointiin:
+            case 'Digit1': 
+                if (e.ctrlKey) {
+                    e.preventDefault();
+                    changeChannel(0); 
+                }
+                break;
+            case 'Digit2': 
+                if (e.ctrlKey) {
+                    e.preventDefault();
+                    changeChannel(1); 
+                }
+                break;
+            case 'Digit3': 
+                if (e.ctrlKey) {
+                    e.preventDefault();
+                    changeChannel(2); 
+                }
+                break;
             case 'BracketLeft': // [ - Siirrä kaikkia nuotteja alas
                 if (e.ctrlKey) {
+                    e.preventDefault();
                     State.transpose--;
                     transposeAllNotes(-1);
                     drawPianoRoll();
@@ -1412,6 +1525,7 @@ function initKeyboardShortcuts() {
                 break;
             case 'BracketRight': // ] - Siirrä kaikkia nuotteja ylös
                 if (e.ctrlKey) {
+                    e.preventDefault();
                     State.transpose++;
                     transposeAllNotes(1);
                     drawPianoRoll();
@@ -1492,6 +1606,13 @@ function init() {
     initMidi();
     initKeyboardShortcuts();
     initCanvasEvents();
+
+    // Tarkista MIDI-tila säännöllisesti
+    setInterval(() => {
+        if (State.midiOutput && State.isPlaying) {
+            console.log('MIDI Output status:', State.midiOutput.state);
+        }
+    }, 5000);
     
     // Color Picker
     const colorPicker = document.createElement('input');
@@ -1743,6 +1864,12 @@ function init() {
         console.log("Pitch buttons initialized");
     } else {
         console.error("Pitch buttons not found in DOM");
+    }
+
+    // Aseta C oletusrootiksi
+    const defaultRootBtn = document.querySelector('#rootButtons button[data-root="0"]');
+    if (defaultRootBtn) {
+        defaultRootBtn.click();
     }
     
     // Aseta oikea kanava näkyviin
