@@ -2,6 +2,7 @@
  * main.js
  * Chord Sequencer & Generator Logic
  * Multi-Track Support (Chords, Bass, Lead), Ghost Notes, Bass Generation.
+ * Updated with LPF, HPF, Peak Limiter, and Authentic-sounding Web Audio Piano fallback.
  */
 
 // --- KONFIGURAATIO JA VAKIOT ---
@@ -68,6 +69,11 @@ const State = {
     // Puskurit kolmelle instrumentille
     buffers: [null, null, null], 
     
+    // MASTER EFFECTS CHAIN NODES
+    masterLPF: null,
+    masterHPF: null,
+    masterLimiter: null,
+    
     bpm: 120,
     isPlaying: false,
     startTime: 0, 
@@ -114,27 +120,151 @@ async function initAudio() {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     State.audioCtx = new AudioContext();
     
+    // 1. Luodaan LPF (Low Pass Filter) korkeiden taajuuksien siistimiseen
+    State.masterLPF = State.audioCtx.createBiquadFilter();
+    State.masterLPF.type = 'lowpass';
+    State.masterLPF.frequency.setValueAtTime(18000, State.audioCtx.currentTime); 
+
+    // 2. Luodaan HPF (High Pass Filter) poistamaan matalimmat huminat ja häiriöalajuudet (sub-bass rumbles)
+    State.masterHPF = State.audioCtx.createBiquadFilter();
+    State.masterHPF.type = 'highpass';
+    State.masterHPF.frequency.setValueAtTime(30, State.audioCtx.currentTime); 
+
+    // 3. Luodaan Peak Limiter estämään säröytyminen (clipping) usean kanavan soidessa yhtä aikaa
+    State.masterLimiter = State.audioCtx.createDynamicsCompressor();
+    State.masterLimiter.threshold.setValueAtTime(-1.0, State.audioCtx.currentTime); 
+    State.masterLimiter.knee.setValueAtTime(0, State.audioCtx.currentTime);          
+    State.masterLimiter.ratio.setValueAtTime(20, State.audioCtx.currentTime);        
+    State.masterLimiter.attack.setValueAtTime(0.003, State.audioCtx.currentTime);    
+    State.masterLimiter.release.setValueAtTime(0.1, State.audioCtx.currentTime);     
+
+    // 4. Yhdistetään master-prosessointiketju: LPF -> HPF -> Limiter -> Äänikortti (destination)
+    State.masterLPF.connect(State.masterHPF);
+    State.masterHPF.connect(State.masterLimiter);
+    State.masterLimiter.connect(State.audioCtx.destination);
+    
     // Ladataan 3 eri samplea
     const fileNames = ['sound1.wav', 'sound2.wav', 'sound3.wav'];
     
-    try {
-        const promises = fileNames.map(async (file, index) => {
+    // Suoritetaan haku erillisinä yrityksinä, jotta yhden epäonnistuminen ei estä muiden latautumista
+    const promises = fileNames.map(async (file, index) => {
+        try {
             const response = await fetch(file);
+            if (!response.ok) throw new Error(`Palvelin vastasi tilakoodilla ${response.status}`);
             const arrayBuffer = await response.arrayBuffer();
             const audioBuffer = await State.audioCtx.decodeAudioData(arrayBuffer);
             State.buffers[index] = audioBuffer;
-        });
-        await Promise.all(promises);
-        console.log("Audio buffers loaded.");
-    } catch (e) {
-        console.error("Virhe ladatessa äänitiedostoja", e);
+            console.log(`Äänitiedosto ${file} ladattu onnistuneesti.`);
+        } catch (e) {
+            console.warn(`Latausvirhe tiedostolle ${file}. Käytetään syntetisoitua pianomallia tällä kanavalla.`, e);
+            State.buffers[index] = null; // Asetetaan eksplisiittisesti nulliksi synteesiä varten
+        }
+    });
+    
+    await Promise.all(promises);
+}
+
+/**
+ * Syntetisoi akustisen pianon kaltaisen äänen käyttäen Web Audio API -oskillaattoreita.
+ * Hyödyntää lisäainemallinnusta (harmoniset yläsävelet), lievää epävireisyyttä ja vasaran iskutransienttia.
+ */
+function playSyntheticPiano(midiNote, durationTime, startTime, channelIndex) {
+    const finalNote = midiNote + State.transpose;
+    const freq = 440 * Math.pow(2, (finalNote - 69) / 12);
+    
+    const now = startTime;
+    const stopTime = startTime + durationTime;
+    
+    // Luodaan päävolume-solmu tälle äänelle
+    const voiceGain = State.audioCtx.createGain();
+    
+    // Harmonisten osasävelten (harmonics) konfiguraatio
+    // Akustinen piano muodostuu perussävelestä ja useista yläsävelistä, jotka värähtelevät hieman epäpuhtaasti
+    const harmonics = [
+        { ratio: 1.0, type: 'sine', amp: 0.5, detune: 0 },
+        { ratio: 1.0, type: 'triangle', amp: 0.25, detune: 3 }, // Lievä epävire akustisen puumaisuuden luomiseksi
+        { ratio: 2.0, type: 'sine', amp: 0.15, detune: 6 },
+        { ratio: 3.0, type: 'sine', amp: 0.08, detune: 10 }
+    ];
+    
+    const oscs = [];
+    const gains = [];
+    
+    harmonics.forEach(h => {
+        const osc = State.audioCtx.createOscillator();
+        osc.type = h.type;
+        osc.frequency.setValueAtTime(freq * h.ratio, now);
+        osc.detune.setValueAtTime(h.detune, now);
+        
+        const gNode = State.audioCtx.createGain();
+        gNode.gain.setValueAtTime(0, now);
+        gNode.gain.linearRampToValueAtTime(h.amp, now + 0.005); // Nopea kosketus (attack)
+        
+        // Kielivärähtelyn luonnollinen eksponentiaalinen vaimeneminen
+        gNode.gain.exponentialRampToValueAtTime(0.001, now + (durationTime * 1.5));
+        
+        osc.connect(gNode);
+        gNode.connect(voiceGain);
+        
+        osc.start(now);
+        osc.stop(stopTime + 0.2);
+        
+        oscs.push(osc);
+        gains.push(gNode);
+    });
+    
+    // Vasaran iskuääni kieleen (Hammer Strike) - erittäin lyhyt ja nopea taajuuspyyhkäisy
+    const hammer = State.audioCtx.createOscillator();
+    hammer.type = 'sine';
+    hammer.frequency.setValueAtTime(freq * 8, now);
+    hammer.frequency.exponentialRampToValueAtTime(freq, now + 0.02);
+    
+    const hammerGain = State.audioCtx.createGain();
+    hammerGain.gain.setValueAtTime(0, now);
+    hammerGain.gain.linearRampToValueAtTime(0.25, now + 0.001);
+    hammerGain.gain.exponentialRampToValueAtTime(0.001, now + 0.02);
+    
+    hammer.connect(hammerGain);
+    hammerGain.connect(voiceGain);
+    hammer.start(now);
+    hammer.stop(now + 0.03);
+    
+    // Yhdistetään master-prosessointiketjuun (LPF)
+    if (State.masterLPF) {
+        voiceGain.connect(State.masterLPF);
+    } else {
+        voiceGain.connect(State.audioCtx.destination);
     }
+    
+    // Voimakkuuden ja sammuttimen (damper pedal) simulointi
+    const masterGainValue = 0.45 * State.masterVolume;
+    voiceGain.gain.setValueAtTime(0, now);
+    voiceGain.gain.linearRampToValueAtTime(masterGainValue, now + 0.005);
+    
+    // Kun kosketin vapautetaan (durationTime päättyy), sammutinhuopa laskeutuu kielelle
+    const releaseTime = 0.15;
+    voiceGain.gain.setValueAtTime(masterGainValue, Math.max(now + 0.01, stopTime - 0.01));
+    voiceGain.gain.exponentialRampToValueAtTime(0.0001, stopTime + releaseTime);
+    
+    // Solmujen ja oskillaattorien automaattinen vapautus muistista soiton jälkeen
+    setTimeout(() => {
+        oscs.forEach(o => { try { o.disconnect(); } catch(e){} });
+        gains.forEach(g => { try { g.disconnect(); } catch(e){} });
+        try { hammer.disconnect(); } catch(e){}
+        try { hammerGain.disconnect(); } catch(e){}
+        try { voiceGain.disconnect(); } catch(e){}
+    }, (durationTime + releaseTime + 1) * 1000);
 }
 
 function playSound(midiNote, durationTime, startTime, channelIndex) {
-    // Valitse oikea puskuri kanavan mukaan
     const buffer = State.buffers[channelIndex];
-    if (!buffer) return;
+    
+    // JOS PUSKURI ON TYHJÄ (ELI LADATTAVA TIEDOSTO PUUTTUU TAI LATAUS EPÄONNISTUI):
+    // Käytetään reaaliaikaista pianomallia
+    if (!buffer) {
+        playSyntheticPiano(midiNote, durationTime, startTime, channelIndex);
+        return;
+    }
 
     // Transponointi (Global)
     const finalNote = midiNote + State.transpose;
@@ -152,7 +282,13 @@ function playSound(midiNote, durationTime, startTime, channelIndex) {
     
     const gainNode = State.audioCtx.createGain();
     source.connect(gainNode);
-    gainNode.connect(State.audioCtx.destination);
+    
+    // Reititetään ääni master-ketjun alkupäähän (LPF) pelkän suoran kaiutinlähdön sijaan
+    if (State.masterLPF) {
+        gainNode.connect(State.masterLPF);
+    } else {
+        gainNode.connect(State.audioCtx.destination);
+    }
     
     const attack = 0.02;
     const release = 0.05;
@@ -581,7 +717,6 @@ function generateArpSequence() {
 // --- BASS GENERATION (NEW) ---
 
 function generateBassTrack() {
-    // Generoi bassoraita Channel 1 (Bass) Channel 0 (Chords) perusteella.
     const chords = State.channels[0];
     const bassTrack = [];
     const targetDur = parseFloat(State.selectedDur);
@@ -636,7 +771,6 @@ function generateBassTrack() {
 // --- LEAD GENERATION (NEW) ---
 
 function generateLeadTrack() {
-    // Generoi lead-raita Channel 2 (Lead) Channel 0 (Chords) perusteella.
     const chords = State.channels[0];
     const leadTrack = [];
     
@@ -646,10 +780,9 @@ function generateLeadTrack() {
     }
 
     chords.forEach(step => {
-        const stepBeats = step.duration / 4; // Beat-määrä tässä soinnussa
+        const stepBeats = step.duration / 4; 
         
         if (step.notes.length === 0) {
-            // Jos sointu on tauko, generoi sama tauko leadille
             leadTrack.push({
                 notes: [],
                 duration: step.duration,
@@ -658,27 +791,17 @@ function generateLeadTrack() {
             return;
         }
 
-        // Määrittele mahdolliset lead-asetukset
-        const maxLeadNotes = 4; // Maksimi lead-nuotteja per sointu
-        const minLeadNotes = 1; // Minimi lead-nuotteja per sointu
+        const maxLeadNotes = 4; 
+        const minLeadNotes = 1; 
         
-        // Satunnainen määrä lead-nuotteja tälle soinnulle (1-4)
         const numLeadNotes = Math.floor(Math.random() * (maxLeadNotes - minLeadNotes + 1)) + minLeadNotes;
-        
-        // Laske kunkin lead-osuuden kesto
         const noteDurations = distributeBeatsRandomly(stepBeats, numLeadNotes);
-        
-        // Käytä sointuun kuuluvia säveliä (sama oktaavi tai 1 oktaavi ylempänä)
         const chordNotes = [...step.notes];
-        
-        // Lisää oktaavi ylempänä olevat säveleet vaihtoehdoiksi
         const higherOctaveNotes = chordNotes.map(note => note + 12);
-        const availableNotes = [...chordNotes, ...higherOctaveNotes].filter(note => note <= 84); // Älä mene liian korkealle
+        const availableNotes = [...chordNotes, ...higherOctaveNotes].filter(note => note <= 84); 
         
         for (let i = 0; i < numLeadNotes; i++) {
-            const noteDuration = noteDurations[i] * 4; // Muunna takaisin duration-muotoon
-            
-            // 30% mahdollisuus taukoon kussakin lead-osassa
+            const noteDuration = noteDurations[i] * 4; 
             const isPause = Math.random() < 0.3;
             
             if (isPause) {
@@ -688,10 +811,7 @@ function generateLeadTrack() {
                     name: "Pause"
                 });
             } else {
-                // Valitse satunnainen sävel saatavilla olevista
                 const randomNote = availableNotes[Math.floor(Math.random() * availableNotes.length)];
-                
-                // 20% mahdollisuus että käytetään sama nuotti kuin edellisessä (jos sellainen on)
                 const useSameNote = (leadTrack.length > 0 && 
                                      leadTrack[leadTrack.length - 1].notes.length > 0 &&
                                      Math.random() < 0.2);
@@ -716,22 +836,17 @@ function generateLeadTrack() {
     drawPianoRoll();
 }
 
-// Apufunktio: Jaa beatit satunnaisesti annettuun määrään osuuksia
 function distributeBeatsRandomly(totalBeats, numParts) {
     const parts = [];
     
-    // Alustaa jokaiselle osalle vähintään 0.25 beat (1/16 nuotti)
     for (let i = 0; i < numParts; i++) {
         parts.push(0.25);
     }
     
-    // Loput beatit jaetaan satunnaisesti
     let remainingBeats = totalBeats - (0.25 * numParts);
     
     while (remainingBeats > 0) {
-        // Valitse satunnainen osa
         const randomPart = Math.floor(Math.random() * numParts);
-        // Lisää satunnainen määrä (0.25, 0.5 tai 1 beat)
         const toAdd = Math.random() < 0.33 ? 0.25 : (Math.random() < 0.5 ? 0.5 : 1);
         
         if (remainingBeats >= toAdd) {
@@ -743,8 +858,7 @@ function distributeBeatsRandomly(totalBeats, numParts) {
         }
     }
     
-    // Varmista ettei yksittäiset osat ole liian pitkiä
-    return parts.map(beats => Math.min(beats, 2)); // Maksimi 2 beat per osa
+    return parts.map(beats => Math.min(beats, 2)); 
 }
 
 // --- EDITING & MANIPULATION ---
@@ -824,14 +938,11 @@ function shiftSelectionPitch(semitones) {
     const step = seq[State.selectedStepIndex];
     if (!step || step.notes.length === 0) return;
     
-    // Siirrä jokainen nuotti
     step.notes = step.notes.map(n => {
         const newNote = n + semitones;
-        // Pidä nuotit MIDI-alueella (0-127)
         return Math.max(0, Math.min(127, newNote));
     });
     
-    // Päivitä nimi
     if (step.notes.length === 1) {
         const n = step.notes[0];
         step.name = NOTE_NAMES[n % 12] + (Math.floor(n/12)-1);
@@ -839,13 +950,8 @@ function shiftSelectionPitch(semitones) {
         step.name = identifyChord(step.notes);
     }
     
-    // Päivitä näkymä
     drawPianoRoll();
-    
-    // Soita preview
     step.notes.forEach(n => playSound(n, 0.1, State.audioCtx.currentTime, State.activeChannel));
-    
-    // Päivitä tekstikenttä
     updateSequenceDisplay();
 }
 
@@ -903,12 +1009,10 @@ function highlightChordInText(index) {
     const text = input.value;
     const parts = text.split(' - ');
     
-    // Tarkista että index on voimassa
     if (index < 0 || index >= parts.length) return;
     
-    // Laske valinnan sijainti tekstissä
     let start = 0;
-    for (let i = 0; i < index; i++) start += parts[i].length + 3; // " - " on 3 merkkiä
+    for (let i = 0; i < index; i++) start += parts[i].length + 3; 
     let end = start + parts[index].length;
     
     input.focus();
@@ -935,12 +1039,11 @@ function generateRandomChord(prevNotes) {
     for (let o = startOct; o <= endOct; o++) {
         for (let inv = 0; inv < 3; inv++) {
             let n = getMidiNotes(newRootPC, newType, o, inv);
-            if (isBass || isLead) n = [n[0]]; // Bassolle ja Leadille vain yksi nuotti
+            if (isBass || isLead) n = [n[0]]; 
             candidates.push({ notes: n, oct: o, inv: inv });
         }
     }
     
-    // LISÄÄ VOICE LEADING LÄHDE main-ääni.js:stä
     if (prevNotes && prevNotes.length > 0) {
         const avgPrev = prevNotes.reduce((a,b) => a + b, 0) / prevNotes.length;
         candidates.sort((a, b) => {
@@ -950,7 +1053,7 @@ function generateRandomChord(prevNotes) {
         });
     }
     
-    const best = candidates[0]; // Käytä nyt ensimmäistä (parasta) eikä satunnaista
+    const best = candidates[0]; 
     State.selectedOctave = best.oct; 
     
     return {
@@ -1031,14 +1134,11 @@ function drawPianoRoll() {
         canvas.height = contentHeight;
     }
     
-    // 1. Background
     ctx.fillStyle = CONFIG.colors.bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // 2. Grid & Names (tämä piirtää myös nuottien nimet)
     drawGrid(ctx, canvas.width, totalKeys);
     
-    // 3. PIIRRÄ NUOTIT (ensimmäinen kerros)
     const channelsToDraw = [0, 1, 2].filter(c => c !== State.activeChannel);
     channelsToDraw.push(State.activeChannel);
     
@@ -1047,10 +1147,7 @@ function drawPianoRoll() {
         drawChannel(ctx, ch, isGhost, canvas.height);
     });
     
-    // 4. Playhead
     drawPlayhead(ctx, canvas.height, totalBeats, wrapper);
-    
-    // 5. PIIRRÄ NUOTTINIMMET UUDELLEEN PÄÄLLIMMÄISENÄ
     drawNoteNamesOnTop(ctx, canvas.height);
 }
 
@@ -1062,20 +1159,17 @@ function drawNoteNamesOnTop(ctx, canvasHeight) {
         const y = i * CONFIG.noteHeight;
         const pc = midiNote % 12;
         
-        // Piirrä nuottinimi päällimmäisenä
         if (State.scale.has(pc) || pc === 0) {
-            ctx.fillStyle = '#ffffff'; // Valkoinen teksti näkyy parhaiten
+            ctx.fillStyle = '#ffffff'; 
             ctx.font = "bold 10px sans-serif";
             
             let noteText;
             if (State.scale.has(pc)) {
                 noteText = NOTE_NAMES[pc];
             } else if (pc === 0) {
-                // Näytä C-nuotit aina
                 noteText = "C" + (Math.floor(midiNote / 12) - 1);
             }
             
-            // Piirrä musta taustalaatikko tekstin taakse
             const textMetrics = ctx.measureText(noteText);
             const textWidth = textMetrics.width + 4;
             const textHeight = 12;
@@ -1083,7 +1177,6 @@ function drawNoteNamesOnTop(ctx, canvasHeight) {
             ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
             ctx.fillRect(2, y + CONFIG.noteHeight - textHeight - 1, textWidth, textHeight);
             
-            // Piirrä teksti
             ctx.fillStyle = '#ffffff';
             ctx.fillText(noteText, 4, y + CONFIG.noteHeight - 3);
         }
@@ -1109,7 +1202,6 @@ function drawGrid(ctx, width, totalKeys) {
         ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
         
-        // Note names
         if (State.scale.has(pc)) {
             ctx.fillStyle = CONFIG.colors.text;
             ctx.font = "10px sans-serif";
@@ -1136,7 +1228,6 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
     
     let currentX = 0;
     
-    // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
     const channelLengths = State.channels.map(ch => {
         if (!ch || ch.length === 0) return 0;
         return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
@@ -1147,30 +1238,24 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
     if (State.isPlaying) {
         const secondsPerBeat = 60.0 / State.bpm;
         currentSequenceTime = (State.audioCtx.currentTime - State.startTime) / secondsPerBeat;
-        // TARKISTA LOOPPAUS
         currentSequenceTime = currentSequenceTime % maxChannelLength;
     }
 
     sequence.forEach((step, index) => {
         const stepBeats = step.duration / 4;
         const stepWidth = stepBeats * CONFIG.pxPerBeat;
-        
-        // TÄRKEÄ MUUTOS: Tarkista onko tämä step parhaillaan soimassa
         const stepStartBeat = currentX / CONFIG.pxPerBeat;
         const stepEndBeat = stepStartBeat + stepBeats;
         
-        // KORJATTU EHTO: Käytä currentSequenceTimea joka on jo loopattu
         const isPlayingNow = State.isPlaying && 
                             (currentSequenceTime >= stepStartBeat && 
                              currentSequenceTime < stepEndBeat);
         
-        // PÄIVITÄ MYÖS VALITTU STEPIN KOROSTUS
         if (!isGhost && index === State.selectedStepIndex) {
             ctx.fillStyle = CONFIG.colors.selection;
             ctx.fillRect(currentX, 0, stepWidth, canvasHeight);
         }
         
-        // Piirrä jokainen nuotti
         step.notes.forEach((note, noteIndex) => {
             const y = (127 - note) * CONFIG.noteHeight;
             
@@ -1178,7 +1263,6 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
                 ctx.fillStyle = hexToRgba(baseColor, 0.2);
                 ctx.fillRect(currentX, y + 1, stepWidth - 1, CONFIG.noteHeight - 2);
             } else {
-                // KORJATTU: Soiva step saa eri värin
                 const noteColor = isPlayingNow ? 
                     adjustColorBrightness(baseColor, 40) : 
                     adjustColorBrightness(baseColor, (noteIndex * -5));
@@ -1192,7 +1276,6 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
             }
         });
         
-        // Lisää extra-korostus soivalle stepille (valinnainen)
         if (isPlayingNow && !isGhost) {
             ctx.strokeStyle = '#ffffff';
             ctx.lineWidth = 2;
@@ -1200,7 +1283,6 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
         }
         
         if (!isGhost) {
-            // Pystyviiva stepin lopussa
             ctx.strokeStyle = '#333';
             ctx.beginPath(); 
             ctx.moveTo(currentX + stepWidth, 0); 
@@ -1219,14 +1301,12 @@ function drawPlayhead(ctx, height, totalBeats, wrapper) {
         const secondsPerBeat = 60.0 / State.bpm;
         const timeElapsed = State.audioCtx.currentTime - State.startTime;
         
-        // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
         const channelLengths = State.channels.map(ch => {
             if (!ch || ch.length === 0) return 0;
             return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
         });
         const maxChannelLength = Math.max(...channelLengths);
         
-        // Laske playhead-position modulo pisimmän kanavan pituudella
         const currentBeats = timeElapsed / secondsPerBeat;
         const loopedBeats = currentBeats % maxChannelLength;
         playheadX = loopedBeats * CONFIG.pxPerBeat;
@@ -1241,7 +1321,6 @@ function drawPlayhead(ctx, height, totalBeats, wrapper) {
     }
 
     if (playheadX >= 0) {
-        // Piirrä playhead
         ctx.strokeStyle = CONFIG.colors.playhead;
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -1249,7 +1328,6 @@ function drawPlayhead(ctx, height, totalBeats, wrapper) {
         ctx.lineTo(playheadX, height);
         ctx.stroke();
         
-        // Piirrä myös looppipiste (punainen viiva pisimmän kanavan lopussa)
         const channelLengths = State.channels.map(ch => {
             if (!ch || ch.length === 0) return 0;
             return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
@@ -1260,15 +1338,14 @@ function drawPlayhead(ctx, height, totalBeats, wrapper) {
         if (loopEndX > 0 && loopEndX < ctx.canvas.width) {
             ctx.strokeStyle = '#ff0000';
             ctx.lineWidth = 1;
-            ctx.setLineDash([5, 5]); // Katkoviiva
+            ctx.setLineDash([5, 5]); 
             ctx.beginPath();
             ctx.moveTo(loopEndX, 0);
             ctx.lineTo(loopEndX, height);
             ctx.stroke();
-            ctx.setLineDash([]); // Nollaa katkoviiva
+            ctx.setLineDash([]); 
         }
         
-        // Autoscroll playheadin mukana
         if (State.isPlaying && wrapper) {
             const wRect = wrapper.getBoundingClientRect();
             if (playheadX > wrapper.scrollLeft + wRect.width - 50) {
@@ -1292,51 +1369,36 @@ function initCanvasEvents() {
 
     let dragStartParams = null;
     let isDraggingNote = false;
-    let activeTouchId = null; // Uusi: seurataan aktiivista kosketusta
+    let activeTouchId = null; 
 
-    // Yhteinen klikkaus/kosketus-funktio
     function handlePointerStart(clientX, clientY, isTouch = false) {
         const rect = canvas.getBoundingClientRect();
-        
-        // Laske koordinaatit
         const canvasX = clientX - rect.left;
         const canvasY = clientY - rect.top;
-        
-        // Huomioi wrapperin scrollaus
         const x = canvasX + wrapper.scrollLeft;
         const y = canvasY + wrapper.scrollTop;
-        
-        console.log(`${isTouch ? 'Touch' : 'Click'} at:`, { canvasX, canvasY, x, y });
         
         const seq = getActiveSequence();
         let scanX = 0;
         let found = null;
         let clickedStepIndex = -1;
         
-        // LASKETAAN STEPIN LEVEYS
         for (let i = 0; i < seq.length; i++) {
             const step = seq[i];
             const stepBeats = step.duration / 4;
             const stepWidth = stepBeats * CONFIG.pxPerBeat;
             
-            // Tarkista X-akseli
             if (x >= scanX && x < scanX + stepWidth) {
                 clickedStepIndex = i;
                 
-                // Tarkista Y-akseli (MIDI-nuotti)
                 if (step.notes.length > 0) {
-                    // Laske MIDI-nuotti Y-koordinaatista
-                    // canvasY käytetään, koska draw funktio käyttää samaa logiikkaa
                     const clickedMidi = 127 - Math.floor(canvasY / CONFIG.noteHeight);
                     
-                    console.log("Checking note:", clickedMidi, "in step notes:", step.notes);
-                    
-                    // Tarkista onko tämä nuotti stepissä
                     if (step.notes.includes(clickedMidi)) {
                         found = { 
                             stepIndex: i, 
                             note: clickedMidi, 
-                            startY: canvasY, // TÄRKEÄ: käytä canvasY, ei y
+                            startY: canvasY, 
                             noteIndex: step.notes.indexOf(clickedMidi),
                             stepStartX: scanX,
                             isTouch: isTouch
@@ -1349,28 +1411,19 @@ function initCanvasEvents() {
         }
         
         if (found) {
-            // Raahataan yksittäistä nuottia
             isDraggingNote = true;
             dragStartParams = found;
             canvas.style.cursor = isTouch ? 'grabbing' : 'pointer';
             
-            console.log("Dragging note:", found.note, "in step", found.stepIndex);
-            
-            // Soita nuotti previewna
             playSound(found.note, 0.2, State.audioCtx.currentTime, State.activeChannel);
-            
-            // Palauttaa true, jotta preventDefault voidaan kutsua
             return true;
         } else if (clickedStepIndex !== -1) {
-            // Valitaan koko sointu
             isDraggingNote = false;
             State.selectedStepIndex = clickedStepIndex;
             drawPianoRoll();
             
-            // Korosta tekstikentässä
             highlightChordInText(clickedStepIndex);
             
-            // Soita preview
             const step = seq[clickedStepIndex];
             if (step.notes.length > 0) {
                 playSound(step.notes[0], 0.1, State.audioCtx.currentTime, State.activeChannel);
@@ -1378,7 +1431,6 @@ function initCanvasEvents() {
             
             return true;
         } else {
-            // Klikattu tyhjää - poista valinta
             isDraggingNote = false;
             State.selectedStepIndex = -1;
             drawPianoRoll();
@@ -1386,7 +1438,6 @@ function initCanvasEvents() {
         }
     }
 
-    // Yhteinen raahaus-funktio
     function handlePointerMove(clientX, clientY) {
         if (!dragStartParams || !isDraggingNote) return;
         
@@ -1396,59 +1447,43 @@ function initCanvasEvents() {
         const diffPx = dragStartParams.startY - canvasY;
         const diffSemi = Math.round(diffPx / CONFIG.noteHeight);
         
-        console.log("Dragging diff:", diffPx, "semitones:", diffSemi);
-        
         if (diffSemi !== 0) {
             const seq = getActiveSequence();
             const step = seq[dragStartParams.stepIndex];
             const oldNote = dragStartParams.note;
             const newNote = oldNote + diffSemi;
             
-            // Rajatarkistus (0-127)
             if (newNote < 0 || newNote > 127) return;
             
             const noteIdx = dragStartParams.noteIndex;
             if (noteIdx !== -1) {
-                // Päivitä nuotti
                 step.notes[noteIdx] = newNote;
                 step.notes.sort((a,b) => a-b);
                 
-                // Päivitä nimi
                 if (step.notes.length === 1) {
                     step.name = NOTE_NAMES[newNote % 12] + (Math.floor(newNote/12)-1);
                 } else {
-                    // Yritä tunnistaa sointu
                     step.name = identifyChord(step.notes);
                 }
                 
-                // Päivitä raahauksen tilaa
                 dragStartParams.note = newNote;
                 dragStartParams.startY = canvasY;
                 
-                // Päivitä näkymä
                 updateSequenceDisplay();
-                
-                // Soita uusi nuotti
                 playSound(newNote, 0.1, State.audioCtx.currentTime, State.activeChannel);
             }
         }
     }
 
-    // Yhteinen päätös-funktio
     function handlePointerEnd() {
-        if (dragStartParams && isDraggingNote) {
-            console.log("Finished dragging note");
-        }
-        
         isDraggingNote = false;
         dragStartParams = null;
         activeTouchId = null;
         canvas.style.cursor = 'default';
     }
 
-    // --- HIIRI-TAPAHTUMAT ---
     canvas.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return; // Vain vasen hiiren nappi
+        if (e.button !== 0) return; 
         if (handlePointerStart(e.clientX, e.clientY, false)) {
             e.preventDefault();
         }
@@ -1460,7 +1495,6 @@ function initCanvasEvents() {
     
     window.addEventListener('mouseup', handlePointerEnd);
 
-    // --- TOUCH-TAPAHTUMAT ---
     canvas.addEventListener('touchstart', (e) => {
         if (e.touches.length === 1) {
             const touch = e.touches[0];
@@ -1470,7 +1504,6 @@ function initCanvasEvents() {
                 e.preventDefault();
             }
             
-            // Visual feedback
             canvas.style.opacity = '0.95';
         }
     }, { passive: false });
@@ -1481,7 +1514,6 @@ function initCanvasEvents() {
             if (touch.identifier === activeTouchId) {
                 handlePointerMove(touch.clientX, touch.clientY);
                 
-                // Estä sivun vieritys canvas-alueella
                 if (!State.isPlaying) {
                     e.preventDefault();
                 }
@@ -1507,27 +1539,19 @@ function initCanvasEvents() {
         canvas.style.opacity = '';
     });
 
-    // Tarkista onko touch-laitteessa
     const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     
     if (isTouchDevice) {
-        console.log("Touch device detected, optimizing for touch...");
-        
-        // Suurennetaan klikkausalueita piano rollissa
         canvas.style.cursor = 'pointer';
         
-        // Lisää myös wrapperiin estä vieritys kosketuksella (vain ei-soitotilassa)
         wrapper.addEventListener('touchmove', (e) => {
             if (!State.isPlaying) {
-                // Estä oletusvieritys canvas-alueella
                 e.preventDefault();
             }
         }, { passive: false });
         
-        // Paranna kosketusresponsiivisuutta
-        canvas.style.touchAction = 'none'; // Salli kaikki touch-toiminnot
+        canvas.style.touchAction = 'none'; 
         
-        // Estä zoomaus canvas-alueella
         canvas.addEventListener('gesturestart', (e) => {
             e.preventDefault();
         });
@@ -1545,19 +1569,15 @@ function identifyChord(notes) {
         return NOTE_NAMES[note % 12] + (Math.floor(note/12)-1);
     }
 
-    // Järjestä nuotit
     const sorted = [...notes].sort((a,b) => a-b);
     const rootMidi = sorted[0];
     const rootName = NOTE_NAMES[rootMidi % 12];
     
-    // Laske intervallit rootista modulo 12
     const intervals = sorted.map(n => (n - rootMidi) % 12).sort((a,b)=>a-b);
     const uniqueIntervals = [...new Set(intervals)];
     
-    // Tunnista sointutyyppi intervallien perusteella
     let typeName = "";
     
-    // Tarkista ensin triadeja
     if (uniqueIntervals.includes(4) && uniqueIntervals.includes(7)) {
         typeName = "maj";
     } else if (uniqueIntervals.includes(3) && uniqueIntervals.includes(7)) {
@@ -1572,7 +1592,6 @@ function identifyChord(notes) {
         typeName = "aug";
     }
     
-    // Tarkista 7-soinnut
     if (uniqueIntervals.includes(4) && uniqueIntervals.includes(7) && uniqueIntervals.includes(10)) {
         if (typeName === "maj") typeName = "7";
         else if (typeName === "min") typeName = "m7";
@@ -1586,7 +1605,6 @@ function identifyChord(notes) {
         typeName = "m7b5";
     }
     
-    // Tarkista laajennukset
     if (uniqueIntervals.includes(4) && uniqueIntervals.includes(7) && uniqueIntervals.includes(14)) {
         typeName = "add9";
     }
@@ -1603,57 +1621,44 @@ function transposeAllNotes(semitones) {
         const seq = State.channels[ch];
         seq.forEach(step => {
             if (step.notes && step.notes.length > 0) {
-                // Siirrä jokainen nuotti
                 step.notes = step.notes.map(n => {
                     const newNote = n + semitones;
-                    // Pidä nuotit MIDI-alueella (0-127)
                     return Math.max(0, Math.min(127, newNote));
                 });
                 
-                // Päivitä nuotin nimi
                 if (step.notes.length === 1) {
                     const n = step.notes[0];
                     step.name = NOTE_NAMES[n % 12] + (Math.floor(n/12)-1);
                 } else if (step.notes.length > 0) {
-                    // Päivitä sointunimi
                     step.name = identifyChord(step.notes);
                 }
             }
         });
     }
-    
-    // Päivitä tekstiesitys
     updateSequenceDisplay();
 }
 
 function initKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
-        // ESTÄ VÄLILYÖNNIN OIKEUDET AIKAISESTI
         if (e.code === 'Space') {
-            e.preventDefault(); // ESTÄ VÄLILYÖNNIN OIKEUDET AIKAISESTI
+            e.preventDefault(); 
             togglePlay();
             return;
         }
         
-        // 'S' PAINAKE SOITON PYSÄYTYKSESSÄ
         if (e.code === 'KeyS') {
             e.preventDefault();
             stopPlay();
             return;
         }
 
-        // NÄMÄ TOIMINNOT VAIN KUN SOITTO EI OLE KÄYNNISSÄ
-        // TAI KUN TEKSTIKENTTÄ EI OLE AKTIIVINEN
         const inputField = document.getElementById('chordStringInput');
         const isInputActive = document.activeElement === inputField;
         
-        // Jos soitto on käynnissä JA tekstikenttä on aktiivisessa fokuksessa,
-        // estä muut näppäinlyhenteet (paitsi Space ja S jotka käsiteltiin jo yllä)
         if (State.isPlaying && isInputActive) {
             return;
         }
         
-        // Normaali logiikka jatkuu
         const rootMap = {
             'Digit1': 0, 'Digit2': 1, 'Digit3': 2, 'Digit4': 3, 'Digit5': 4, 'Digit6': 5, 
             'Digit7': 6, 'Digit8': 7, 'Digit9': 8, 'Digit0': 9, 'KeyI': 10, 'KeyO': 11, 'KeyP': 'pause'
@@ -1670,9 +1675,7 @@ function initKeyboardShortcuts() {
         }
 
         switch(e.code) {
-            // Space ja S on jo käsitelty
             case 'KeyA': 
-                // Estä 'A' kirjoittamasta tekstikenttään
                 e.preventDefault();
                 addChordToSequence(); 
                 const btnA = document.getElementById('btnAddChord'); 
@@ -1733,7 +1736,7 @@ function initKeyboardShortcuts() {
                     changeChannel(2); 
                 }
                 break;
-            case 'BracketLeft': // [ - Siirrä kaikkia nuotteja alas
+            case 'BracketLeft': 
                 if (e.ctrlKey) {
                     e.preventDefault();
                     State.transpose--;
@@ -1741,7 +1744,7 @@ function initKeyboardShortcuts() {
                     drawPianoRoll();
                 }
                 break;
-            case 'BracketRight': // ] - Siirrä kaikkia nuotteja ylös
+            case 'BracketRight': 
                 if (e.ctrlKey) {
                     e.preventDefault();
                     State.transpose++;
@@ -1755,12 +1758,9 @@ function initKeyboardShortcuts() {
 
 function changeChannel(channelIndex) {
     State.activeChannel = channelIndex;
-    State.selectedStepIndex = -1; // Resetoi valinta kanavan vaihdon yhteydessä
+    State.selectedStepIndex = -1; 
     
-    // Päivitä UI
     updateChannelUI();
-    
-    // Päivitä näkymä
     updateSequenceDisplay();
     drawPianoRoll();
     
@@ -1768,13 +1768,11 @@ function changeChannel(channelIndex) {
 }
 
 function updateChannelUI() {
-    // Päivitä painikkeiden aktiivinen tila
     document.querySelectorAll('.channel-btn').forEach(btn => {
         const channel = parseInt(btn.dataset.channel);
         btn.classList.toggle('active', channel === State.activeChannel);
     });
     
-    // Näytä/piilota Generoi Basso ja Generoi Lead -napit
     const btnGenBass = document.getElementById('btnGenBass');
     const btnGenLead = document.getElementById('btnGenLead');
     
@@ -1786,7 +1784,6 @@ function updateChannelUI() {
         btnGenLead.style.display = (State.activeChannel === 2) ? 'inline-block' : 'none';
     }
     
-    // Päivitä kanavan nimi näkyviin
     const channelNames = ['Chords', 'Bass', 'Lead'];
     const channelDisplay = document.getElementById('channelDisplay');
     if (channelDisplay) {
@@ -1831,19 +1828,16 @@ function init() {
     initKeyboardShortcuts();
     initCanvasEvents();
 
-    // Tarkista MIDI-tila säännöllisesti
     setInterval(() => {
         if (State.midiOutput && State.isPlaying) {
             console.log('MIDI Output status:', State.midiOutput.state);
         }
     }, 5000);
 
-    // VOLUME SLIDER
     const volumeSlider = document.getElementById('volumeSlider');
     const volumeValue = document.getElementById('volumeValue');
     
     if (volumeSlider && volumeValue) {
-        // Päivitä sliderin arvo Stateen
         State.masterVolume = volumeSlider.value / 100;
         
         volumeSlider.addEventListener('input', (e) => {
@@ -1851,7 +1845,6 @@ function init() {
             State.masterVolume = value / 100;
             volumeValue.textContent = `${value}%`;
             
-            // Testaa volumea soittamalla preview-nuotin
             if (State.selectedRoot !== null && State.selectedRoot !== 'pause') {
                 const previewNotes = getMidiNotes(State.selectedRoot, State.selectedType, State.selectedOctave, State.selectedInv);
                 if (previewNotes.length > 0) {
@@ -1860,7 +1853,6 @@ function init() {
             }
         });
         
-        // Nopea reset - klikkaa prosenttia palauttaaksesi 100%
         volumeValue.addEventListener('click', () => {
             volumeSlider.value = 100;
             State.masterVolume = 1.0;
@@ -1868,7 +1860,6 @@ function init() {
         });
     }
     
-    // Color Picker
     const colorPicker = document.createElement('input');
     colorPicker.type = 'color';
     colorPicker.value = '#9c27b0';
@@ -1876,7 +1867,6 @@ function init() {
     colorPicker.addEventListener('input', (e) => updateThemeColor(e.target.value));
     document.querySelector('.transpose-controls').appendChild(colorPicker);
 
-    // Project Buttons
     const midiControls = document.querySelector('.midi-controls');
     const btnSave = document.createElement('button');
     btnSave.innerText = "Save Project";
@@ -1886,7 +1876,7 @@ function init() {
             const saveState = {
                 channels: State.channels,
                 bpm: State.bpm,
-                scale: Array.from(State.scale), // Muunna taulukoksi tallennusta varten
+                scale: Array.from(State.scale), 
                 transpose: State.transpose,
                 activeChannel: State.activeChannel
             };
@@ -1908,7 +1898,6 @@ function init() {
                 if (newState.transpose) State.transpose = newState.transpose;
                 if (newState.activeChannel !== undefined) {
                     State.activeChannel = newState.activeChannel;
-                    // Päivitä UI suoraan
                     updateChannelUI();
                 }
                 
@@ -1920,7 +1909,6 @@ function init() {
                     else key.classList.remove('active');
                 });
                 
-                // Päivitä näkymä
                 updateSequenceDisplay();
                 drawPianoRoll();
                 
@@ -1932,10 +1920,8 @@ function init() {
     midiControls.insertBefore(btnLoad, midiControls.firstChild);
     midiControls.insertBefore(btnSave, midiControls.firstChild);
 
-    // Luo kanavanvaihtopainikkeet ja näyttö jos niitä ei ole HTML:ssä
     setupChannelControls();
 
-    // Piano Scale
     document.querySelectorAll('.key').forEach(key => {
         key.addEventListener('click', () => {
             const note = parseInt(key.dataset.note);
@@ -1954,7 +1940,6 @@ function init() {
         }
     });
     
-    // Octave
     document.querySelectorAll('#octaveButtons button').forEach(btn => {
         btn.addEventListener('click', (e) => {
             document.querySelectorAll('#octaveButtons button').forEach(b => b.classList.remove('selected'));
@@ -1964,7 +1949,6 @@ function init() {
         });
     });
     
-    // Root
     document.querySelectorAll('#rootButtons button').forEach(btn => {
         btn.addEventListener('click', (e) => {
             initAudio(); 
@@ -1982,7 +1966,6 @@ function init() {
         });
     });
     
-    // Type
     document.querySelectorAll('#typeButtons button').forEach(btn => {
         btn.addEventListener('click', (e) => {
             document.querySelectorAll('#typeButtons button').forEach(b => b.classList.remove('selected'));
@@ -1991,7 +1974,6 @@ function init() {
         });
     });
     
-    // Inversion
     document.querySelectorAll('#invButtons button').forEach(btn => {
         btn.addEventListener('click', (e) => {
             document.querySelectorAll('#invButtons button').forEach(b => b.classList.remove('selected'));
@@ -2000,7 +1982,6 @@ function init() {
         });
     });
     
-    // Duration
     document.querySelectorAll('#durButtons button').forEach(btn => {
         btn.addEventListener('click', (e) => {
             document.querySelectorAll('#durButtons button').forEach(b => b.classList.remove('selected'));
@@ -2009,7 +1990,6 @@ function init() {
         });
     });
     
-    // ARP Controls
     document.getElementById('btnArpOctLow').addEventListener('click', (e) => {
         State.arpOctaveLow = !State.arpOctaveLow;
         e.target.classList.toggle('selected', State.arpOctaveLow);
@@ -2020,14 +2000,12 @@ function init() {
     });
     document.getElementById('btnArp').addEventListener('click', generateArpSequence);
     
-    // Edit Controls
     document.getElementById('btnMoveLeft').addEventListener('click', () => moveSelection(-1));
     document.getElementById('btnMoveRight').addEventListener('click', () => moveSelection(1));
     document.getElementById('btnReplace').addEventListener('click', replaceSelection);
     document.getElementById('btnDelete').addEventListener('click', deleteSelection);
     document.getElementById('btnUpdateText').addEventListener('click', updateFromText);
 
-    // Main Actions
     document.getElementById('btnAddChord').addEventListener('click', addChordToSequence);
     
     document.getElementById('btnRnd').addEventListener('click', () => {
@@ -2072,27 +2050,21 @@ function init() {
         }
     });
     
-    // Transponointi napit
     document.getElementById('btnTransUp').addEventListener('click', () => {
         State.transpose++;
         shiftScale(1);
-        // Siirrä kaikkien kanavien nuotteja ylös
         transposeAllNotes(1);
-        // Päivitä näkymä
         drawPianoRoll();
     });
     document.getElementById('btnTransDown').addEventListener('click', () => {
         State.transpose--;
         shiftScale(-1);
-        // Siirrä kaikkien kanavien nuotteja alas
         transposeAllNotes(-1);
-        // Päivitä näkymä
         drawPianoRoll();
     });
     
     document.getElementById('btnExport').addEventListener('click', () => {
         if (typeof MidiExporter !== 'undefined') {
-            // VIE KAIKKI 3 RAITAA YHDESSÄ
             MidiExporter.downloadMidi(State.channels, State.bpm);
         } else {
             alert('Midi Export module not loaded.');
@@ -2120,13 +2092,11 @@ function init() {
         console.error("Pitch buttons not found in DOM");
     }
 
-    // Aseta C oletusrootiksi
     const defaultRootBtn = document.querySelector('#rootButtons button[data-root="0"]');
     if (defaultRootBtn) {
         defaultRootBtn.click();
     }
     
-    // Aseta oikea kanava näkyviin
     updateChannelUI();
     updateUIDimming();
     drawPianoRoll();
@@ -2135,7 +2105,6 @@ function init() {
 }
 
 function setupChannelControls() {
-    // Tarkista onko kanavanvaihtopainikkeet jo HTML:ssä
     if (!document.querySelector('.channel-controls')) {
         const channelContainer = document.createElement('div');
         channelContainer.className = 'channel-controls';
@@ -2144,7 +2113,6 @@ function setupChannelControls() {
         channelContainer.style.backgroundColor = '#1a1a1a';
         channelContainer.style.borderRadius = '5px';
         
-        // Lisää kanavan näyttö
         const channelDisplay = document.createElement('div');
         channelDisplay.id = 'channelDisplay';
         channelDisplay.style.marginBottom = '8px';
@@ -2153,7 +2121,6 @@ function setupChannelControls() {
         channelDisplay.textContent = 'Active: Chords';
         channelContainer.appendChild(channelDisplay);
         
-        // Lisää painikkeet
         const buttonsContainer = document.createElement('div');
         buttonsContainer.style.display = 'flex';
         buttonsContainer.style.gap = '8px';
@@ -2190,7 +2157,6 @@ function setupChannelControls() {
         
         channelContainer.appendChild(buttonsContainer);
         
-        // Lisää Generoi Basso -nappi
         const btnGenBass = document.createElement('button');
         btnGenBass.id = 'btnGenBass';
         btnGenBass.className = 'small-btn';
@@ -2206,13 +2172,12 @@ function setupChannelControls() {
         
         channelContainer.appendChild(btnGenBass);
 
-        // LISÄÄ TÄMÄ: Generoi Lead -nappi
         const btnGenLead = document.createElement('button');
         btnGenLead.id = 'btnGenLead';
         btnGenLead.className = 'small-btn';
         btnGenLead.textContent = 'Generate Lead from Chords';
         btnGenLead.style.marginTop = '10px';
-        btnGenLead.style.backgroundColor = CONFIG.colors.ch2; // Oranssi lead-kanavalle
+        btnGenLead.style.backgroundColor = CONFIG.colors.ch2; 
         btnGenLead.style.color = '#fff';
         btnGenLead.style.border = 'none';
         btnGenLead.style.padding = '6px 12px';
@@ -2222,16 +2187,13 @@ function setupChannelControls() {
         
         channelContainer.appendChild(btnGenLead);
         
-        // Lisää kontrollit sivulle
         const controlsSection = document.querySelector('.controls');
         if (controlsSection) {
             controlsSection.insertBefore(channelContainer, document.querySelector('.chord-controls'));
         }
     }
     
-    // Lisää event listenerit kanavanvaihtopainikkeille
     document.querySelectorAll('.channel-btn').forEach(btn => {
-        // Poista vanhat listenerit ensin
         const newBtn = btn.cloneNode(true);
         btn.parentNode.replaceChild(newBtn, btn);
         
@@ -2241,13 +2203,11 @@ function setupChannelControls() {
         });
     });
     
-    // Lisää event listener Generoi Basso -napille
     const btnGenBass = document.getElementById('btnGenBass');
     if (btnGenBass) {
         btnGenBass.addEventListener('click', generateBassTrack);
     }
 
-    // Lisää event listener Generoi Lead -napille
     const btnGenLead = document.getElementById('btnGenLead');
     if (btnGenLead) {
         btnGenLead.addEventListener('click', generateLeadTrack);
