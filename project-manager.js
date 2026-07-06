@@ -1,14 +1,13 @@
 /**
  * project-manager.js
  * Hoitaa projektin tallentamisen JSON-tiedostoon ja lataamisen sieltä.
- * Päivitetty tukemaan moniraitaisuutta (Channels).
+ * Päivitetty tukemaan moniraitaisuutta (4 kanavaa: Chords, Lead, Bass, Drums).
  */
 
 const ProjectManager = {
 
     /**
      * Tallentaa nykyisen tilan JSON-tiedostoksi.
-     * @param {Object} state - Sovelluksen globaali State-objekti main.js:stä
      */
     saveProject: function(state) {
         if (!state) {
@@ -16,21 +15,16 @@ const ProjectManager = {
             return;
         }
 
-        // Muunnetaan State tallennuskelpoiseen muotoon
         const projectData = {
-            version: "2.0", // Versio nostettu moniraitaisuuden vuoksi
+            version: "3.0", // Korotettu versio uuden Drums-kanavan vuoksi
             timestamp: new Date().toISOString(),
             bpm: state.bpm,
             transpose: state.transpose,
-            // Set -> Array
             scale: Array.from(state.scale), 
             
-            // TALLENNETAAN KAIKKI KANAVAT
-            // Jos state.channels on olemassa, käytetään sitä. 
-            // Fallback: tallennetaan vanha sequence arraynä arrayn sisällä.
-            channels: state.channels || [state.sequence, [], []],
+            // TALLENNETAAN KAIKKI 4 KANAVAA
+            channels: state.channels || [state.sequence, [], [], []],
             
-            // Tallennetaan UI-valinnat
             ui: {
                 selectedOctave: state.selectedOctave,
                 selectedRoot: state.selectedRoot,
@@ -46,7 +40,7 @@ const ProjectManager = {
         const url = URL.createObjectURL(blob);
 
         const dateStr = new Date().toISOString().slice(0, 10);
-        const filename = `chord_project_multitrack_${dateStr}.json`;
+        const filename = `chord_project_4track_${dateStr}.json`;
 
         const a = document.createElement('a');
         a.href = url;
@@ -62,7 +56,6 @@ const ProjectManager = {
 
     /**
      * Avaa tiedostonvalinnan ja lataa projektin.
-     * @param {Function} onLoadedCallback - Kutsutaan kun data on valmis.
      */
     loadProject: function(onLoadedCallback) {
         const input = document.createElement('input');
@@ -79,25 +72,20 @@ const ProjectManager = {
                 try {
                     const data = JSON.parse(event.target.result);
                     
-                    // Alustava validointi
                     if (typeof data.bpm === 'undefined') {
-                        throw new Error("Tiedosto ei vaikuta validilta projektilta.");
+                        throw new Error("Tiedosto ei ole yhteensopiva sekvensseriprojekti.");
                     }
 
-                    // Palautettava tila
+                    // Palautetaan ja varmistetaan 4-kanavainen asettelu
                     const restoredState = {
                         bpm: data.bpm,
                         transpose: data.transpose || 0,
                         scale: new Set(data.scale || [0, 2, 4, 5, 7, 9, 11]), 
                         
-                        // KANAVIEN KÄSITTELY
-                        // 1. Jos uusi format (channels array), käytä sitä
-                        // 2. Jos vanha format (sequence array), laita se kanavalle 0
                         channels: data.channels 
                             ? data.channels 
-                            : [data.sequence || [], [], []],
+                            : [data.sequence || [], [], [], []],
                         
-                        // UI-arvot
                         ui: {
                             selectedOctave: data.ui?.selectedOctave ?? 3,
                             selectedRoot: data.ui?.selectedRoot ?? null,
@@ -108,12 +96,17 @@ const ProjectManager = {
                         }
                     };
 
-                    console.log("Projekti ladattu.");
+                    // Jos ladatussa projektissa oli vain 3 kanavaa, täydennetään neljänneksi tyhjä kanava rummulle
+                    while (restoredState.channels.length < 4) {
+                        restoredState.channels.push([]);
+                    }
+
+                    console.log("Projekti ladattu onnistuneesti (4 kanavaa).");
                     onLoadedCallback(restoredState);
 
                 } catch (err) {
-                    console.error("Virhe ladatessa:", err);
-                    alert("Virhe ladatessa tiedostoa: " + err.message);
+                    console.error("Virhe ladatessa projektia:", err);
+                    alert("Virhe projektin lataamisessa: " + err.message);
                 }
             };
 
