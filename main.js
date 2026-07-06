@@ -1,22 +1,20 @@
 /**
  * main.js
  * Chord Sequencer & Generator Logic
- * Multi-Track Support (Chords, Bass, Lead), Ghost Notes, Bass Generation.
- * Updated with LPF, HPF, Peak Limiter, and Authentic-sounding Web Audio Piano fallback.
+ * Multi-Track Support (Chords, Lead, Bass, Drums), Web Audio Synthesizers, custom WAV loading & MIDI Import mapping.
  */
 
 // --- KONFIGURAATIO JA VAKIOT ---
 const CONFIG = {
     baseFreq: 261.63, // C4
     loopStart: 0.0,
-    loopEnd: 2.0, // Sample loop points (if needed)
+    loopEnd: 2.0, 
     lookahead: 25.0, // ms
     scheduleAheadTime: 0.1, // s
     ppq: 24, // Pulses per quarter note
     noteHeight: 14, // px per key
     pxPerBeat: 50,  // Leveys per isku
     
-    // Värit (Päivitetään teeman mukaan, mutta tässä kanavakohtaiset oletukset)
     colors: {
         bg: '#0f0f0f',
         gridLines: '#222',
@@ -24,10 +22,11 @@ const CONFIG = {
         gridWhite: '#2a2a2a', 
         gridScale: '#2e1c36', 
         
-        // Kanavien värit
+        // Kanavien värit (Päivitetty)
         ch0: '#9c27b0', // Chords (Violetti)
-        ch1: '#00bcd4', // Bass (Cyan)
-        ch2: '#ff9800', // Lead (Oranssi)
+        ch1: '#ff9800', // Lead (Oranssi)
+        ch2: '#00bcd4', // Bass (Cyan)
+        ch3: '#4caf50', // Drums (Vihreä)
         
         playhead: '#ff4081',   
         text: '#888',
@@ -37,26 +36,21 @@ const CONFIG = {
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
-// Laajennettu sointukirjasto
 const CHORD_FORMULAS = {
-    // Triads
     "maj": [0, 4, 7],
     "min": [0, 3, 7],
     "sus2": [0, 2, 7],
     "sus4": [0, 5, 7],
     "dim": [0, 3, 6],
     "aug": [0, 4, 8],
-    // 6th
     "6": [0, 4, 7, 9],
     "m6": [0, 3, 7, 9],
-    // 7th
     "7": [0, 4, 7, 10],       
     "maj7": [0, 4, 7, 11],    
     "m7": [0, 3, 7, 10],      
     "mmaj7": [0, 3, 7, 11],   
     "dim7": [0, 3, 6, 9],     
     "m7b5": [0, 3, 6, 10],    
-    // Extensions
     "add9": [0, 4, 7, 14],
     "9": [0, 4, 7, 10, 14],
     "11": [0, 7, 10, 14, 17],
@@ -66,10 +60,8 @@ const CHORD_FORMULAS = {
 // --- GLOBAL STATE ---
 const State = {
     audioCtx: null,
-    // Puskurit kolmelle instrumentille
-    buffers: [null, null, null], 
+    buffers: [null, null, null, null], // Ch 1, 2, 3 voivat käyttää lisensoitua/omaa WAV-tietoa
     
-    // MASTER EFFECTS CHAIN NODES
     masterLPF: null,
     masterHPF: null,
     masterLimiter: null,
@@ -78,32 +70,25 @@ const State = {
     isPlaying: false,
     startTime: 0, 
     nextNoteTime: 0.0,
-
-    // VOLUME
-    masterVolume: 0.8, // 0-1, oletus 0.8 (80%)
+    masterVolume: 0.8, 
     
-    // Sekvensserin tila
     channelTimes: null,
-    channelIndices: [0, 0, 0], // Jokaisen kanavan eteneminen erikseen
+    channelIndices: [0, 0, 0, 0], 
     
-    scale: new Set([0, 2, 4, 5, 7, 9, 11]), // C Major oletus
+    scale: new Set([0, 2, 4, 5, 7, 9, 11]), 
     
-    // MONIRAITA TUKI
-    // channels[0] = Chords, channels[1] = Bass, channels[2] = Lead
-    channels: [[], [], []], 
-    activeChannel: 0, // 0, 1, tai 2
+    // 4 KANAVAA (Chords, Lead, Bass, Drums)
+    channels: [[], [], [], []], 
+    activeChannel: 0, 
     
-    // UI Valinnat
     selectedOctave: 3,
     selectedRoot: null, 
     selectedType: 'maj',
     selectedInv: 0,
-    selectedDur: 8, // 4 = 1 beat
+    selectedDur: 8, 
     
-    // Editointi tila
-    selectedStepIndex: -1, // Kohdistuu aina activeChanneliin
+    selectedStepIndex: -1, 
     
-    // ARP Tila
     arpOctaveLow: false,
     arpOctaveHigh: false,
     
@@ -120,17 +105,14 @@ async function initAudio() {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     State.audioCtx = new AudioContext();
     
-    // 1. Luodaan LPF (Low Pass Filter) korkeiden taajuuksien siistimiseen
     State.masterLPF = State.audioCtx.createBiquadFilter();
     State.masterLPF.type = 'lowpass';
     State.masterLPF.frequency.setValueAtTime(18000, State.audioCtx.currentTime); 
 
-    // 2. Luodaan HPF (High Pass Filter) poistamaan matalimmat huminat ja häiriöalajuudet (sub-bass rumbles)
     State.masterHPF = State.audioCtx.createBiquadFilter();
     State.masterHPF.type = 'highpass';
     State.masterHPF.frequency.setValueAtTime(30, State.audioCtx.currentTime); 
 
-    // 3. Luodaan Peak Limiter estämään säröytyminen (clipping) usean kanavan soidessa yhtä aikaa
     State.masterLimiter = State.audioCtx.createDynamicsCompressor();
     State.masterLimiter.threshold.setValueAtTime(-1.0, State.audioCtx.currentTime); 
     State.masterLimiter.knee.setValueAtTime(0, State.audioCtx.currentTime);          
@@ -138,51 +120,27 @@ async function initAudio() {
     State.masterLimiter.attack.setValueAtTime(0.003, State.audioCtx.currentTime);    
     State.masterLimiter.release.setValueAtTime(0.1, State.audioCtx.currentTime);     
 
-    // 4. Yhdistetään master-prosessointiketju: LPF -> HPF -> Limiter -> Äänikortti (destination)
     State.masterLPF.connect(State.masterHPF);
     State.masterHPF.connect(State.masterLimiter);
     State.masterLimiter.connect(State.audioCtx.destination);
     
-    // Ladataan 3 eri samplea
-    const fileNames = ['sound1.wav', 'sound2.wav', 'sound3.wav'];
-    
-    // Suoritetaan haku erillisinä yrityksinä, jotta yhden epäonnistuminen ei estä muiden latautumista
-    const promises = fileNames.map(async (file, index) => {
-        try {
-            const response = await fetch(file);
-            if (!response.ok) throw new Error(`Palvelin vastasi tilakoodilla ${response.status}`);
-            const arrayBuffer = await response.arrayBuffer();
-            const audioBuffer = await State.audioCtx.decodeAudioData(arrayBuffer);
-            State.buffers[index] = audioBuffer;
-            console.log(`Äänitiedosto ${file} ladattu onnistuneesti.`);
-        } catch (e) {
-            console.warn(`Latausvirhe tiedostolle ${file}. Käytetään syntetisoitua pianomallia tällä kanavalla.`, e);
-            State.buffers[index] = null; // Asetetaan eksplisiittisesti nulliksi synteesiä varten
-        }
-    });
-    
-    await Promise.all(promises);
+    console.log("Audio Context ja master-efektiketju alustettu. Ei oletussampleja ladata.");
 }
 
 /**
- * Syntetisoi akustisen pianon kaltaisen äänen käyttäen Web Audio API -oskillaattoreita.
- * Hyödyntää lisäainemallinnusta (harmoniset yläsävelet), lievää epävireisyyttä ja vasaran iskutransienttia.
+ * Syntetisoi aidon kuuloisen akustisen pianomallin (harmoniset yläsävelet & iskutransientti).
  */
 function playSyntheticPiano(midiNote, durationTime, startTime, channelIndex) {
     const finalNote = midiNote + State.transpose;
     const freq = 440 * Math.pow(2, (finalNote - 69) / 12);
-    
     const now = startTime;
     const stopTime = startTime + durationTime;
     
-    // Luodaan päävolume-solmu tälle äänelle
     const voiceGain = State.audioCtx.createGain();
     
-    // Harmonisten osasävelten (harmonics) konfiguraatio
-    // Akustinen piano muodostuu perussävelestä ja useista yläsävelistä, jotka värähtelevät hieman epäpuhtaasti
     const harmonics = [
         { ratio: 1.0, type: 'sine', amp: 0.5, detune: 0 },
-        { ratio: 1.0, type: 'triangle', amp: 0.25, detune: 3 }, // Lievä epävire akustisen puumaisuuden luomiseksi
+        { ratio: 1.0, type: 'triangle', amp: 0.25, detune: 3 }, 
         { ratio: 2.0, type: 'sine', amp: 0.15, detune: 6 },
         { ratio: 3.0, type: 'sine', amp: 0.08, detune: 10 }
     ];
@@ -198,9 +156,7 @@ function playSyntheticPiano(midiNote, durationTime, startTime, channelIndex) {
         
         const gNode = State.audioCtx.createGain();
         gNode.gain.setValueAtTime(0, now);
-        gNode.gain.linearRampToValueAtTime(h.amp, now + 0.005); // Nopea kosketus (attack)
-        
-        // Kielivärähtelyn luonnollinen eksponentiaalinen vaimeneminen
+        gNode.gain.linearRampToValueAtTime(h.amp, now + 0.005); 
         gNode.gain.exponentialRampToValueAtTime(0.001, now + (durationTime * 1.5));
         
         osc.connect(gNode);
@@ -213,7 +169,6 @@ function playSyntheticPiano(midiNote, durationTime, startTime, channelIndex) {
         gains.push(gNode);
     });
     
-    // Vasaran iskuääni kieleen (Hammer Strike) - erittäin lyhyt ja nopea taajuuspyyhkäisy
     const hammer = State.audioCtx.createOscillator();
     hammer.type = 'sine';
     hammer.frequency.setValueAtTime(freq * 8, now);
@@ -229,24 +184,20 @@ function playSyntheticPiano(midiNote, durationTime, startTime, channelIndex) {
     hammer.start(now);
     hammer.stop(now + 0.03);
     
-    // Yhdistetään master-prosessointiketjuun (LPF)
     if (State.masterLPF) {
         voiceGain.connect(State.masterLPF);
     } else {
         voiceGain.connect(State.audioCtx.destination);
     }
     
-    // Voimakkuuden ja sammuttimen (damper pedal) simulointi
     const masterGainValue = 0.45 * State.masterVolume;
     voiceGain.gain.setValueAtTime(0, now);
     voiceGain.gain.linearRampToValueAtTime(masterGainValue, now + 0.005);
     
-    // Kun kosketin vapautetaan (durationTime päättyy), sammutinhuopa laskeutuu kielelle
     const releaseTime = 0.15;
     voiceGain.gain.setValueAtTime(masterGainValue, Math.max(now + 0.01, stopTime - 0.01));
     voiceGain.gain.exponentialRampToValueAtTime(0.0001, stopTime + releaseTime);
     
-    // Solmujen ja oskillaattorien automaattinen vapautus muistista soiton jälkeen
     setTimeout(() => {
         oscs.forEach(o => { try { o.disconnect(); } catch(e){} });
         gains.forEach(g => { try { g.disconnect(); } catch(e){} });
@@ -256,23 +207,163 @@ function playSyntheticPiano(midiNote, durationTime, startTime, channelIndex) {
     }, (durationTime + releaseTime + 1) * 1000);
 }
 
+/**
+ * Syntetisoi täysin puhtaat rumpuäänet (Kick, Snare, Hi-Hat, Clap) Web Audio API:lla Ch 4 -kanavalle.
+ */
+function playSyntheticDrum(midiNote, durationTime, startTime) {
+    const ctx = State.audioCtx;
+    const now = startTime;
+    
+    const drumGain = ctx.createGain();
+    drumGain.gain.setValueAtTime(0.85 * State.masterVolume, now);
+    
+    if (State.masterLPF) {
+        drumGain.connect(State.masterLPF);
+    } else {
+        drumGain.connect(ctx.destination);
+    }
+
+    const noteClass = midiNote % 12; 
+    let drumType = 'kick';
+    
+    if (midiNote === 36 || noteClass === 0 || noteClass === 1) { 
+        drumType = 'kick';
+    } else if (midiNote === 38 || noteClass === 2 || noteClass === 3 || noteClass === 4 || noteClass === 5) { 
+        drumType = 'snare';
+    } else if (midiNote === 42 || noteClass === 6 || noteClass === 7 || noteClass === 8) { 
+        drumType = 'hihat';
+    } else { 
+        drumType = 'clap';
+    }
+
+    if (drumType === 'kick') {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        
+        osc.frequency.setValueAtTime(140, now);
+        osc.frequency.exponentialRampToValueAtTime(0.01, now + 0.1);
+        
+        gain.gain.setValueAtTime(1.0, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+        
+        osc.connect(gain);
+        gain.connect(drumGain);
+        
+        osc.start(now);
+        osc.stop(now + 0.15);
+    } 
+    else if (drumType === 'snare') {
+        const noise = createNoiseBufferNode(ctx);
+        const noiseGain = ctx.createGain();
+        const noiseFilter = ctx.createBiquadFilter();
+        
+        noiseFilter.type = 'bandpass';
+        noiseFilter.frequency.value = 1000;
+        
+        noiseGain.gain.setValueAtTime(0.65, now);
+        noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.14);
+        
+        noise.connect(noiseFilter);
+        noiseFilter.connect(noiseGain);
+        noiseGain.connect(drumGain);
+        
+        const osc = ctx.createOscillator();
+        const oscGain = ctx.createGain();
+        osc.frequency.setValueAtTime(180, now);
+        osc.frequency.exponentialRampToValueAtTime(80, now + 0.08);
+        
+        oscGain.gain.setValueAtTime(0.4, now);
+        oscGain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+        
+        osc.connect(oscGain);
+        oscGain.connect(drumGain);
+        
+        noise.start(now);
+        noise.stop(now + 0.18);
+        osc.start(now);
+        osc.stop(now + 0.1);
+    } 
+    else if (drumType === 'hihat') {
+        const noise = createNoiseBufferNode(ctx);
+        const gain = ctx.createGain();
+        const filter = ctx.createBiquadFilter();
+        
+        filter.type = 'highpass';
+        filter.frequency.value = 7500;
+        
+        gain.gain.setValueAtTime(0.4, now);
+        const decayTime = (midiNote === 46 || noteClass === 8) ? 0.22 : 0.04;
+        gain.gain.exponentialRampToValueAtTime(0.01, now + decayTime);
+        
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(drumGain);
+        
+        noise.start(now);
+        noise.stop(now + decayTime + 0.05);
+    } 
+    else if (drumType === 'clap') {
+        const noise = createNoiseBufferNode(ctx);
+        const gain = ctx.createGain();
+        const filter = ctx.createBiquadFilter();
+        
+        filter.type = 'bandpass';
+        filter.frequency.value = 1500;
+        filter.Q.value = 1.5;
+        
+        const t = now;
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.5, t + 0.001);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.01);
+        
+        gain.gain.linearRampToValueAtTime(0.5, t + 0.011);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.02);
+        
+        gain.gain.linearRampToValueAtTime(0.5, t + 0.021);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.03);
+        
+        gain.gain.linearRampToValueAtTime(0.7, t + 0.031);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+        
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(drumGain);
+        
+        noise.start(now);
+        noise.stop(now + 0.2);
+    }
+}
+
+function createNoiseBufferNode(ctx) {
+    const bufferSize = ctx.sampleRate * 0.5; 
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    return source;
+}
+
 function playSound(midiNote, durationTime, startTime, channelIndex) {
+    if (channelIndex === 3) { 
+        playSyntheticDrum(midiNote, durationTime, startTime);
+        return;
+    }
+
     const buffer = State.buffers[channelIndex];
     
-    // JOS PUSKURI ON TYHJÄ (ELI LADATTAVA TIEDOSTO PUUTTUU TAI LATAUS EPÄONNISTUI):
-    // Käytetään reaaliaikaista pianomallia
     if (!buffer) {
         playSyntheticPiano(midiNote, durationTime, startTime, channelIndex);
         return;
     }
 
-    // Transponointi (Global)
     const finalNote = midiNote + State.transpose;
-    
     const source = State.audioCtx.createBufferSource();
     source.buffer = buffer;
     
-    // Pitch shift
     const playbackRate = Math.pow(2, (finalNote - 60) / 12);
     source.playbackRate.value = playbackRate;
     
@@ -283,7 +374,6 @@ function playSound(midiNote, durationTime, startTime, channelIndex) {
     const gainNode = State.audioCtx.createGain();
     source.connect(gainNode);
     
-    // Reititetään ääni master-ketjun alkupäähän (LPF) pelkän suoran kaiutinlähdön sijaan
     if (State.masterLPF) {
         gainNode.connect(State.masterLPF);
     } else {
@@ -293,8 +383,7 @@ function playSound(midiNote, durationTime, startTime, channelIndex) {
     const attack = 0.02;
     const release = 0.05;
     
-    // Envelope + Master Volume
-    const gainValue = 0.8 * State.masterVolume; // Oletusgain * master volume
+    const gainValue = 0.8 * State.masterVolume; 
     gainNode.gain.setValueAtTime(0, startTime);
     gainNode.gain.linearRampToValueAtTime(gainValue, startTime + attack);
     
@@ -342,37 +431,22 @@ function sendMidiNote(note, durationTime, channel) {
     if (!State.midiOutput) return;
     const finalNote = note + State.transpose;
     
-    // MIDI Channel: 0x90 = Ch1, 0x91 = Ch2, 0x92 = Ch3
     const noteOnStatus = 0x90 + channel;
     const noteOffStatus = 0x80 + channel;
     
-    // Lähetä note on heti
     State.midiOutput.send([noteOnStatus, finalNote, 100]);
-    
-    // Täsmällinen aikataulutus note off:lle Web Audio API:n avulla
     const stopTime = State.audioCtx.currentTime + durationTime;
     
-    // Luo aikatauluttu note off
     const scheduleNoteOff = () => {
         const now = State.audioCtx.currentTime;
         if (now >= stopTime) {
             State.midiOutput.send([noteOffStatus, finalNote, 0]);
         } else {
-            // Käytä setTimeout vain jos audio context on suspended
-            if (State.audioCtx.state === 'suspended') {
-                setTimeout(() => {
-                    State.midiOutput.send([noteOffStatus, finalNote, 0]);
-                }, (stopTime - now) * 1000);
-            } else {
-                // Käytä audio contextin schedule-tarkkuutta
-                setTimeout(() => {
-                    State.midiOutput.send([noteOffStatus, finalNote, 0]);
-                }, (stopTime - now) * 1000);
-            }
+            setTimeout(() => {
+                State.midiOutput.send([noteOffStatus, finalNote, 0]);
+            }, (stopTime - now) * 1000);
         }
     };
-    
-    // Suorita note off
     scheduleNoteOff();
 }
 
@@ -380,24 +454,16 @@ function sendMidiNote(note, durationTime, channel) {
 
 function scheduler() {
     if (!State.channelTimes) {
-        State.channelTimes = [State.nextNoteTime, State.nextNoteTime, State.nextNoteTime];
+        State.channelTimes = [State.nextNoteTime, State.nextNoteTime, State.nextNoteTime, State.nextNoteTime];
     }
-
-    // Debug-tietoja
-    const debugInfo = {
-        channelTimes: State.channelTimes.map(t => t.toFixed(3)),
-        currentTime: State.audioCtx ? State.audioCtx.currentTime.toFixed(3) : 'N/A',
-        channelIndices: [...State.channelIndices]
-    };
     
-    // LASKETAAN PISIN KANAVA LOOPPAAKSEEN
     const channelLengths = State.channels.map(ch => {
         if (!ch || ch.length === 0) return 0;
         return ch.reduce((sum, s) => sum + (s.duration / 4), 0);
     });
     const maxChannelLength = Math.max(...channelLengths);
     
-    for (let ch = 0; ch < 3; ch++) {
+    for (let ch = 0; ch < 4; ch++) {
         while (State.channelTimes[ch] < State.audioCtx.currentTime + CONFIG.scheduleAheadTime) {
             const seq = State.channels[ch];
             if (seq && seq.length > 0) {
@@ -409,35 +475,24 @@ function scheduler() {
                     const durationSeconds = (60.0 / State.bpm) * beats;
                     
                     if (step.notes.length > 0) {
-                        console.log(`MIDI Channel ${ch}: Playing step ${idx}, ${step.notes.length} notes`);
                         step.notes.forEach(note => {
                             playSound(note, durationSeconds, State.channelTimes[ch], ch);
-                            
-                            // MIDI-lähetys suoraan ilman delaya
                             sendMidiNote(note, durationSeconds, ch);
                         });
-                    } else {
-                        console.log(`MIDI Channel ${ch}: Empty step ${idx}`);
                     }
                     
-                    // Siirrä aikaa eteenpäin tämän kanavan osalta
                     State.channelTimes[ch] += durationSeconds;
-                    
-                    // Kasvata indeksiä
                     State.channelIndices[ch] = (idx + 1) % seq.length;
-                    
                 } else {
-                    // Tyhjä askel
                     State.channelTimes[ch] += 0.1;
                     State.channelIndices[ch] = (State.channelIndices[ch] + 1) % seq.length;
                 }
             } else {
-                State.channelTimes[ch] += 0.5; // Idle
+                State.channelTimes[ch] += 0.5; 
             }
         }
     }
     
-    // Päivitetään globaali nextNoteTime
     State.nextNoteTime = Math.min(...State.channelTimes);
 
     if (State.isPlaying) {
@@ -448,30 +503,35 @@ function scheduler() {
 function updatePlayingHighlight() {
     if (!State.isPlaying) return;
     
-    // Etsi kanava ja step joka on parhaillaan soimassa
-    for (let ch = 0; ch < 3; ch++) {
+    const secondsPerBeat = 60.0 / State.bpm;
+    const timeElapsed = State.audioCtx.currentTime - State.startTime;
+    
+    const channelLengths = State.channels.map(channel => {
+        if (!channel || channel.length === 0) return 0;
+        return channel.reduce((sum, s) => sum + (s.duration / 4), 0);
+    });
+    const maxChannelLength = Math.max(...channelLengths);
+    if (maxChannelLength === 0) return;
+    
+    const songDuration = maxChannelLength * secondsPerBeat;
+    
+    // Sujuva toisto repeatilla: Synkronoidaan loopin aloituskohta ja poistetaan pyöristysvirheiden kertyminen
+    if (timeElapsed >= songDuration) {
+        const cycles = Math.floor(timeElapsed / songDuration);
+        State.startTime += cycles * songDuration;
+    }
+    
+    // Lasketaan loopattu tahtikohta juuri synkronoidun State.startTime-arvon mukaan
+    const currentBeats = ((State.audioCtx.currentTime - State.startTime) / secondsPerBeat) % maxChannelLength;
+    
+    for (let ch = 0; ch < 4; ch++) {
         const seq = State.channels[ch];
         if (!seq || seq.length === 0) continue;
         
-        const secondsPerBeat = 60.0 / State.bpm;
-        const timeElapsed = State.audioCtx.currentTime - State.startTime;
-        
-        // Lasketaan pisimmän kanavan pituus
-        const channelLengths = State.channels.map(channel => {
-            if (!channel || channel.length === 0) return 0;
-            return channel.reduce((sum, s) => sum + (s.duration / 4), 0);
-        });
-        const maxChannelLength = Math.max(...channelLengths);
-        
-        // Loopattu aika
-        const currentBeats = (timeElapsed / secondsPerBeat) % maxChannelLength;
-        
-        // Etsi step joka on soimassa
         let beatCounter = 0;
         for (let i = 0; i < seq.length; i++) {
             const stepBeats = seq[i].duration / 4;
             if (currentBeats >= beatCounter && currentBeats < beatCounter + stepBeats) {
-                // Jos tämä on aktiivinen kanava, päivitä highlight
                 if (ch === State.activeChannel && i !== State.selectedStepIndex) {
                     State.selectedStepIndex = i;
                     highlightChordInText(i);
@@ -491,7 +551,7 @@ function animate() {
         return;
     }
     
-    updatePlayingHighlight(); // Päivitä highlight soivan stepin mukaan
+    updatePlayingHighlight(); 
     drawPianoRoll(); 
     State.animationId = requestAnimationFrame(animate);
 }
@@ -504,10 +564,9 @@ function togglePlay() {
     
     const inputField = document.getElementById('chordStringInput');
     
-    // Jos pysäytetään, lähetä MIDI all notes off
     if (State.isPlaying && State.midiOutput) {
-        for (let ch = 0; ch < 3; ch++) {
-            State.midiOutput.send([0xB0 + ch, 123, 0]); // All Notes Off
+        for (let ch = 0; ch < 4; ch++) {
+            State.midiOutput.send([0xB0 + ch, 123, 0]); 
         }
     }
     
@@ -518,24 +577,19 @@ function togglePlay() {
         btn.innerHTML = "⏸ Pause";
         btn.classList.add('selected');
         
-        // Estä syöttö soittotilassa
         inputField.readOnly = true;
         inputField.style.backgroundColor = '#222';
         inputField.style.cursor = 'default';
         
-        // Reset counters
-        State.channelIndices = [0, 0, 0];
+        State.channelIndices = [0, 0, 0, 0];
         
         const startTime = State.audioCtx.currentTime + 0.05;
         State.startTime = startTime;
         State.nextNoteTime = startTime;
-        State.channelTimes = [startTime, startTime, startTime];
+        State.channelTimes = [startTime, startTime, startTime, startTime];
         
-        // Sync playhead to selection if possible
         if (State.selectedStepIndex !== -1) {
-            // Käytetään vain aktiivista kanavaa visualisointiin
             State.channelIndices[State.activeChannel] = State.selectedStepIndex;
-            // Lasketaan aika offset
             const seq = State.channels[State.activeChannel];
             let beats = 0;
             for(let i = 0; i < State.selectedStepIndex && i < seq.length; i++) {
@@ -552,13 +606,11 @@ function togglePlay() {
         btn.innerHTML = "▶ Play";
         btn.classList.remove('selected');
         
-        // Salli syöttö uudelleen pysäytys-tilassa
         inputField.readOnly = false;
         inputField.style.backgroundColor = '';
         inputField.style.cursor = 'text';
         
-        // Nollataan kaikki soittotilat
-        State.channelIndices = [0, 0, 0];
+        State.channelIndices = [0, 0, 0, 0];
         State.channelTimes = null;
         State.nextNoteTime = 0.0;
         
@@ -573,21 +625,17 @@ function stopPlay() {
     btn.innerHTML = "▶ Play";
     btn.classList.remove('selected');
     
-    // Salli syöttö uudelleen
     const inputField = document.getElementById('chordStringInput');
     inputField.readOnly = false;
     inputField.style.backgroundColor = '';
     inputField.style.cursor = 'text';
     
-    State.channelIndices = [0, 0, 0];
+    State.channelIndices = [0, 0, 0, 0];
     
-    // LÄHETÄ MIDI ALL NOTES OFF KAIKILLA KANAVILLA
     if (State.midiOutput) {
-        for (let ch = 0; ch < 3; ch++) {
-            // MIDI Control Change 123 = All Notes Off
+        for (let ch = 0; ch < 4; ch++) {
             State.midiOutput.send([0xB0 + ch, 123, 0]);
-            // Tarkista myös note off kaikille kanaville
-            State.midiOutput.send([0x80 + ch, 0, 0]); // Note off for note 0 (ei välttämättä tarpeen)
+            State.midiOutput.send([0x80 + ch, 0, 0]); 
         }
     }
     
@@ -714,7 +762,67 @@ function generateArpSequence() {
     scrollToEnd();
 }
 
-// --- BASS GENERATION (NEW) ---
+// --- GENERATORS ---
+
+function generateLeadTrack() {
+    const chords = State.channels[0];
+    const leadTrack = [];
+    
+    if (!chords || chords.length === 0) {
+        alert("Luo ensin sointuja kanavalle 1 (Chords).");
+        return;
+    }
+
+    chords.forEach(step => {
+        const stepBeats = step.duration / 4; 
+        
+        if (step.notes.length === 0) {
+            leadTrack.push({
+                notes: [],
+                duration: step.duration,
+                name: "Pause"
+            });
+            return;
+        }
+
+        const maxLeadNotes = 4; 
+        const minLeadNotes = 1; 
+        const numLeadNotes = Math.floor(Math.random() * (maxLeadNotes - minLeadNotes + 1)) + minLeadNotes;
+        const noteDurations = distributeBeatsRandomly(stepBeats, numLeadNotes);
+        const chordNotes = [...step.notes];
+        const higherOctaveNotes = chordNotes.map(note => note + 12);
+        const availableNotes = [...chordNotes, ...higherOctaveNotes].filter(note => note <= 84); 
+        
+        for (let i = 0; i < numLeadNotes; i++) {
+            const noteDuration = noteDurations[i] * 4; 
+            const isPause = Math.random() < 0.3;
+            
+            if (isPause) {
+                leadTrack.push({
+                    notes: [],
+                    duration: noteDuration,
+                    name: "Pause"
+                });
+            } else {
+                const randomNote = availableNotes[Math.floor(Math.random() * availableNotes.length)];
+                const useSameNote = (leadTrack.length > 0 && 
+                                     leadTrack[leadTrack.length - 1].notes.length > 0 &&
+                                     Math.random() < 0.2);
+                
+                let noteToUse = useSameNote ? leadTrack[leadTrack.length - 1].notes[0] : randomNote;
+                
+                leadTrack.push({
+                    notes: [noteToUse],
+                    duration: noteDuration,
+                    name: NOTE_NAMES[noteToUse % 12] + (Math.floor(noteToUse/12)-1)
+                });
+            }
+        }
+    });
+
+    State.channels[1] = leadTrack; // Lead on Ch 2 (indeksi 1)
+    drawPianoRoll();
+}
 
 function generateBassTrack() {
     const chords = State.channels[0];
@@ -729,13 +837,11 @@ function generateBassTrack() {
     chords.forEach(step => {
         const stepBeats = step.duration / 4;
         const bassBeats = targetDur / 4;
-        
         const repetitions = Math.floor(stepBeats / bassBeats);
         
         let bassMidi = null;
         if (step.notes.length > 0) {
             const root = Math.min(...step.notes);
-            
             let candidate = root - 12;
             if (candidate < 36) {
                 candidate = root;
@@ -764,15 +870,13 @@ function generateBassTrack() {
         }
     });
 
-    State.channels[1] = bassTrack;
+    State.channels[2] = bassTrack; // Bass on Ch 3 (indeksi 2)
     drawPianoRoll();
 }
 
-// --- LEAD GENERATION (NEW) ---
-
-function generateLeadTrack() {
+function generateDrumTrack() {
     const chords = State.channels[0];
-    const leadTrack = [];
+    const drumTrack = [];
     
     if (!chords || chords.length === 0) {
         alert("Luo ensin sointuja kanavalle 1 (Chords).");
@@ -781,74 +885,46 @@ function generateLeadTrack() {
 
     chords.forEach(step => {
         const stepBeats = step.duration / 4; 
+        const subdivisions = Math.floor(stepBeats * 4); // 16-osat
         
-        if (step.notes.length === 0) {
-            leadTrack.push({
-                notes: [],
-                duration: step.duration,
-                name: "Pause"
-            });
-            return;
-        }
-
-        const maxLeadNotes = 4; 
-        const minLeadNotes = 1; 
-        
-        const numLeadNotes = Math.floor(Math.random() * (maxLeadNotes - minLeadNotes + 1)) + minLeadNotes;
-        const noteDurations = distributeBeatsRandomly(stepBeats, numLeadNotes);
-        const chordNotes = [...step.notes];
-        const higherOctaveNotes = chordNotes.map(note => note + 12);
-        const availableNotes = [...chordNotes, ...higherOctaveNotes].filter(note => note <= 84); 
-        
-        for (let i = 0; i < numLeadNotes; i++) {
-            const noteDuration = noteDurations[i] * 4; 
-            const isPause = Math.random() < 0.3;
+        for (let i = 0; i < subdivisions; i++) {
+            let notes = [];
+            let name = "Pause";
             
-            if (isPause) {
-                leadTrack.push({
-                    notes: [],
-                    duration: noteDuration,
-                    name: "Pause"
-                });
-            } else {
-                const randomNote = availableNotes[Math.floor(Math.random() * availableNotes.length)];
-                const useSameNote = (leadTrack.length > 0 && 
-                                     leadTrack[leadTrack.length - 1].notes.length > 0 &&
-                                     Math.random() < 0.2);
-                
-                let noteToUse;
-                if (useSameNote) {
-                    noteToUse = leadTrack[leadTrack.length - 1].notes[0];
-                } else {
-                    noteToUse = randomNote;
-                }
-                
-                leadTrack.push({
-                    notes: [noteToUse],
-                    duration: noteDuration,
-                    name: NOTE_NAMES[noteToUse % 12] + (Math.floor(noteToUse/12)-1)
-                });
+            if (i % 4 === 0) {
+                notes.push(36);
+                name = "Kick";
             }
+            if (i % 8 === 4) {
+                notes.push(38);
+                name = (name === "Kick") ? "Kick+Sn" : "Snare";
+            }
+            if (i % 4 === 2) {
+                notes.push(42);
+                name = (name === "Pause") ? "Hi-Hat" : name + "+Hat";
+            }
+            
+            drumTrack.push({
+                notes: notes,
+                duration: 1, 
+                name: name
+            });
         }
     });
 
-    State.channels[2] = leadTrack;
+    State.channels[3] = drumTrack; // Drums on Ch 4 (indeksi 3)
     drawPianoRoll();
 }
 
 function distributeBeatsRandomly(totalBeats, numParts) {
     const parts = [];
-    
     for (let i = 0; i < numParts; i++) {
         parts.push(0.25);
     }
-    
     let remainingBeats = totalBeats - (0.25 * numParts);
-    
     while (remainingBeats > 0) {
         const randomPart = Math.floor(Math.random() * numParts);
         const toAdd = Math.random() < 0.33 ? 0.25 : (Math.random() < 0.5 ? 0.5 : 1);
-        
         if (remainingBeats >= toAdd) {
             parts[randomPart] += toAdd;
             remainingBeats -= toAdd;
@@ -857,7 +933,6 @@ function distributeBeatsRandomly(totalBeats, numParts) {
             remainingBeats = 0;
         }
     }
-    
     return parts.map(beats => Math.min(beats, 2)); 
 }
 
@@ -1031,8 +1106,8 @@ function generateRandomChord(prevNotes) {
     let newType = validTypes.length > 0 ? validTypes[Math.floor(Math.random() * validTypes.length)] : 'maj';
 
     let candidates = [];
-    const isBass = State.activeChannel === 1;
-    const isLead = State.activeChannel === 2;
+    const isBass = State.activeChannel === 2;
+    const isLead = State.activeChannel === 1;
     const startOct = isBass ? 2 : 3;
     const endOct = isBass ? 3 : 5;
     
@@ -1139,7 +1214,7 @@ function drawPianoRoll() {
     
     drawGrid(ctx, canvas.width, totalKeys);
     
-    const channelsToDraw = [0, 1, 2].filter(c => c !== State.activeChannel);
+    const channelsToDraw = [0, 1, 2, 3].filter(c => c !== State.activeChannel);
     channelsToDraw.push(State.activeChannel);
     
     channelsToDraw.forEach(ch => {
@@ -1225,6 +1300,7 @@ function drawChannel(ctx, channelIndex, isGhost, canvasHeight) {
     let baseColor = CONFIG.colors.ch0;
     if (channelIndex === 1) baseColor = CONFIG.colors.ch1;
     if (channelIndex === 2) baseColor = CONFIG.colors.ch2;
+    if (channelIndex === 3) baseColor = CONFIG.colors.ch3;
     
     let currentX = 0;
     
@@ -1414,6 +1490,7 @@ function initCanvasEvents() {
             isDraggingNote = true;
             dragStartParams = found;
             canvas.style.cursor = isTouch ? 'grabbing' : 'pointer';
+            canvas.style.touchAction = 'none'; // Lukitsee kosketusrullauksen nuotin muokkauksen ajaksi
             
             playSound(found.note, 0.2, State.audioCtx.currentTime, State.activeChannel);
             return true;
@@ -1429,11 +1506,13 @@ function initCanvasEvents() {
                 playSound(step.notes[0], 0.1, State.audioCtx.currentTime, State.activeChannel);
             }
             
+            canvas.style.touchAction = 'pan-x pan-y'; // Salli pyyhkäisy rullaukseen tyhjässä kohdassa
             return true;
         } else {
             isDraggingNote = false;
             State.selectedStepIndex = -1;
             drawPianoRoll();
+            canvas.style.touchAction = 'pan-x pan-y'; // Salli pyyhkäisy rullaukseen tyhjässä kohdassa
             return true;
         }
     }
@@ -1480,6 +1559,7 @@ function initCanvasEvents() {
         dragStartParams = null;
         activeTouchId = null;
         canvas.style.cursor = 'default';
+        canvas.style.touchAction = 'pan-x pan-y'; // Vapautetaan kosketusrullaus vapaaksi pyyhkäisyä varten
     }
 
     canvas.addEventListener('mousedown', (e) => {
@@ -1501,7 +1581,10 @@ function initCanvasEvents() {
             activeTouchId = touch.identifier;
             
             if (handlePointerStart(touch.clientX, touch.clientY, true)) {
-                e.preventDefault();
+                // Estetään oletusvieritys vain silloin, kun raahataan tai muokataan nuottia
+                if (isDraggingNote) {
+                    e.preventDefault();
+                }
             }
             
             canvas.style.opacity = '0.95';
@@ -1514,7 +1597,8 @@ function initCanvasEvents() {
             if (touch.identifier === activeTouchId) {
                 handlePointerMove(touch.clientX, touch.clientY);
                 
-                if (!State.isPlaying) {
+                // Estetään sivun vieritys VAIN jos ollaan parhaillaan siirtämässä/raahaamassa nuottia
+                if (isDraggingNote) {
                     e.preventDefault();
                 }
             }
@@ -1527,7 +1611,6 @@ function initCanvasEvents() {
                 if (e.changedTouches[i].identifier === activeTouchId) {
                     handlePointerEnd();
                     canvas.style.opacity = '';
-                    e.preventDefault();
                     break;
                 }
             }
@@ -1543,14 +1626,7 @@ function initCanvasEvents() {
     
     if (isTouchDevice) {
         canvas.style.cursor = 'pointer';
-        
-        wrapper.addEventListener('touchmove', (e) => {
-            if (!State.isPlaying) {
-                e.preventDefault();
-            }
-        }, { passive: false });
-        
-        canvas.style.touchAction = 'none'; 
+        canvas.style.touchAction = 'pan-x pan-y'; // Sallii kaksiulotteisen sormirullauksen suoraan canvas-alueen päältä
         
         canvas.addEventListener('gesturestart', (e) => {
             e.preventDefault();
@@ -1736,6 +1812,12 @@ function initKeyboardShortcuts() {
                     changeChannel(2); 
                 }
                 break;
+            case 'Digit4': 
+                if (e.ctrlKey) {
+                    e.preventDefault();
+                    changeChannel(3); 
+                }
+                break;
             case 'BracketLeft': 
                 if (e.ctrlKey) {
                     e.preventDefault();
@@ -1764,7 +1846,7 @@ function changeChannel(channelIndex) {
     updateSequenceDisplay();
     drawPianoRoll();
     
-    console.log(`Kanava vaihdettu: ${channelIndex} (${['Chords', 'Bass', 'Lead'][channelIndex]})`);
+    console.log(`Kanava vaihdettu: ${channelIndex} (${['Chords', 'Lead', 'Bass', 'Drums'][channelIndex]})`);
 }
 
 function updateChannelUI() {
@@ -1773,22 +1855,188 @@ function updateChannelUI() {
         btn.classList.toggle('active', channel === State.activeChannel);
     });
     
-    const btnGenBass = document.getElementById('btnGenBass');
     const btnGenLead = document.getElementById('btnGenLead');
-    
-    if (btnGenBass) {
-        btnGenBass.style.display = (State.activeChannel === 1) ? 'inline-block' : 'none';
-    }
+    const btnGenBass = document.getElementById('btnGenBass');
+    const btnGenDrums = document.getElementById('btnGenDrums');
     
     if (btnGenLead) {
-        btnGenLead.style.display = (State.activeChannel === 2) ? 'inline-block' : 'none';
+        btnGenLead.style.display = (State.activeChannel === 1) ? 'inline-block' : 'none';
     }
     
-    const channelNames = ['Chords', 'Bass', 'Lead'];
+    if (btnGenBass) {
+        btnGenBass.style.display = (State.activeChannel === 2) ? 'inline-block' : 'none';
+    }
+
+    if (btnGenDrums) {
+        btnGenDrums.style.display = (State.activeChannel === 3) ? 'inline-block' : 'none';
+    }
+    
+    const channelNames = ['Chords', 'Lead', 'Bass', 'Drums'];
     const channelDisplay = document.getElementById('channelDisplay');
     if (channelDisplay) {
         channelDisplay.textContent = `Active: ${channelNames[State.activeChannel]}`;
     }
+}
+
+// --- WAV UPLOADER INTEGRATION ---
+
+function initWavUploads() {
+    for (let i = 0; i < 3; i++) {
+        const btn = document.getElementById(`btnLoadWavCh${i+1}`);
+        const input = document.getElementById(`inputWavCh${i+1}`);
+        
+        if (btn && input) {
+            btn.addEventListener('click', () => input.click());
+            input.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                try {
+                    if (!State.audioCtx) await initAudio();
+                    
+                    const arrayBuffer = await file.arrayBuffer();
+                    State.audioCtx.decodeAudioData(arrayBuffer, (decodedBuffer) => {
+                        State.buffers[i] = decodedBuffer;
+                        btn.style.borderColor = '#4caf50';
+                        btn.textContent = `Ch ${i+1}: Custom`;
+                        console.log(`Ladattu oma WAV tiedosto kanavalle Ch ${i+1}`);
+                    }, (err) => {
+                        console.error(`WAV-dekoodaus epäonnistui kanavalla ${i+1}:`, err);
+                        alert(`WAV-dekoodaus epäonnistui: ${err.message || err}`);
+                    });
+                } catch (err) {
+                    console.error("Virhe ladatessa WAV-tiedostoa:", err);
+                    alert("Virhe tiedoston latauksessa: " + err.message);
+                }
+            });
+        }
+    }
+}
+
+// --- QUANTIZED MIDI CONVERTER (IMPORT) ---
+
+function convertMidiTrackToSequence(trackEvents, ppq) {
+    const ticksPer16th = Math.round(ppq / 4);
+    if (ticksPer16th <= 0) return [];
+    
+    let maxTick = 0;
+    trackEvents.forEach(e => {
+        if (e.ticks > maxTick) maxTick = e.ticks;
+    });
+    
+    if (maxTick === 0) return [];
+    
+    const total16ths = Math.ceil(maxTick / ticksPer16th);
+    
+    // Luodaan taulukot jokaisen 16-osanuotin tilalle sekä iskun retrigger-tunnistukselle
+    const stepStates = Array.from({ length: total16ths }, () => new Set());
+    const triggeredAtStep = Array.from({ length: total16ths }, () => new Set());
+    
+    const noteIntervals = {};
+    const activeStarts = {};
+    
+    // Järjestetään tapahtumat ajan mukaan
+    trackEvents.sort((a, b) => a.ticks - b.ticks);
+    
+    trackEvents.forEach(e => {
+        if (e.type === 'note_on') {
+            activeStarts[e.note] = e.ticks;
+            
+            // Lasketaan mihin 16-osavaiheeseen isku sijoittuu
+            const triggerStep = Math.floor(e.ticks / ticksPer16th);
+            if (triggerStep >= 0 && triggerStep < total16ths) {
+                triggeredAtStep[triggerStep].add(e.note);
+            }
+        } else if (e.type === 'note_off') {
+            if (activeStarts[e.note] !== undefined) {
+                if (!noteIntervals[e.note]) noteIntervals[e.note] = [];
+                noteIntervals[e.note].push({
+                    start: activeStarts[e.note],
+                    end: e.ticks
+                });
+                delete activeStarts[e.note];
+            }
+        }
+    });
+    
+    // Käsitellään mahdolliset avoimeksi jääneet nuotit
+    Object.keys(activeStarts).forEach(note => {
+        const midi = parseInt(note);
+        if (!noteIntervals[midi]) noteIntervals[midi] = [];
+        noteIntervals[midi].push({
+            start: activeStarts[midi],
+            end: maxTick
+        });
+    });
+    
+    // Täytetään kunkin 16-osanuotin soivat sävelet
+    for (let i = 0; i < total16ths; i++) {
+        const stepStartTick = i * ticksPer16th;
+        const stepEndTick = (i + 1) * ticksPer16th;
+        
+        Object.keys(noteIntervals).forEach(note => {
+            const midi = parseInt(note);
+            const intervals = noteIntervals[midi];
+            const isActive = intervals.some(inv => (inv.start < stepEndTick && inv.end > stepStartTick));
+            
+            if (isActive) {
+                stepStates[i].add(midi);
+            }
+        });
+    }
+    
+    // Rakennetaan lopullinen sekvenssi yhdistäen askeleet
+    const sequence = [];
+    let i = 0;
+    while (i < total16ths) {
+        const currentNotes = Array.from(stepStates[i]).sort((a,b)=>a-b);
+        let duration = 1; 
+        
+        while (i + duration < total16ths) {
+            const nextNotes = Array.from(stepStates[i + duration]).sort((a,b)=>a-b);
+            
+            // Jos nuotit muuttuvat, katkaistaan yhdistäminen
+            if (currentNotes.length !== nextNotes.length || !currentNotes.every((n, idx) => n === nextNotes[idx])) {
+                break;
+            }
+            
+            // Tarkistetaan retriggerit: Jos jollakin nykyisistä sävelistä on uusi note_on tapahtunut tässä stepissä,
+            // niin ei yhdistetä näitä askeleita vaan säästetään erillinen isku.
+            let hasRetrigger = false;
+            for (let note of currentNotes) {
+                if (triggeredAtStep[i + duration].has(note)) {
+                    hasRetrigger = true;
+                    break;
+                }
+            }
+            
+            if (hasRetrigger) {
+                break;
+            }
+            
+            duration++;
+        }
+        
+        let stepName = "Pause";
+        if (currentNotes.length > 0) {
+            if (currentNotes.length === 1) {
+                const n = currentNotes[0];
+                stepName = NOTE_NAMES[n % 12] + (Math.floor(n/12)-1);
+            } else {
+                stepName = identifyChord(currentNotes);
+            }
+        }
+        
+        sequence.push({
+            notes: currentNotes,
+            duration: duration,
+            name: stepName
+        });
+        
+        i += duration;
+    }
+    
+    return sequence;
 }
 
 // --- HELPERS ---
@@ -1827,6 +2075,7 @@ function init() {
     initMidi();
     initKeyboardShortcuts();
     initCanvasEvents();
+    initWavUploads(); 
 
     setInterval(() => {
         if (State.midiOutput && State.isPlaying) {
@@ -1919,6 +2168,92 @@ function init() {
     
     midiControls.insertBefore(btnLoad, midiControls.firstChild);
     midiControls.insertBefore(btnSave, midiControls.firstChild);
+
+    // --- MIDI IMPORT BINDINGS ---
+    const btnMidiImport = document.getElementById('btnMidiImport');
+    const inputMidiImport = document.getElementById('inputMidiImport');
+    const modal = document.getElementById('midiImportModal');
+    const btnConfirm = document.getElementById('btnMidiImportConfirm');
+    const btnCancel = document.getElementById('btnMidiImportCancel');
+    
+    let currentMidiTracks = null;
+    let currentMidiBpm = null;
+
+    if (btnMidiImport && inputMidiImport) {
+        btnMidiImport.addEventListener('click', () => inputMidiImport.click());
+        inputMidiImport.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            MidiExporter.importMidi(file, (activeTracks, bpm) => {
+                currentMidiTracks = activeTracks;
+                currentMidiBpm = bpm;
+                
+                if (activeTracks.length === 1) {
+                    const seq = convertMidiTrackToSequence(activeTracks[0].events, activeTracks[0].ppq);
+                    State.channels[State.activeChannel] = seq;
+                    
+                    if (bpm) {
+                        State.bpm = bpm;
+                        document.getElementById('tempoInput').value = bpm;
+                    }
+                    
+                    updateSequenceDisplay();
+                    drawPianoRoll();
+                    alert(`MIDI tuotu suoraan valitulle kanavalle CH ${State.activeChannel + 1} (${activeTracks[0].name})`);
+                } else {
+                    for (let ch = 0; ch < 4; ch++) {
+                        const select = document.getElementById(`midiMapCh${ch}`);
+                        select.innerHTML = '<option value="">-- Ei mitään --</option>';
+                        activeTracks.forEach((t, idx) => {
+                            const option = document.createElement('option');
+                            option.value = idx;
+                            option.textContent = `${t.name} (${t.events.filter(e => e.type === 'note_on').length} nuottia)`;
+                            select.appendChild(option);
+                        });
+                        if (ch < activeTracks.length) {
+                            select.value = ch;
+                        }
+                    }
+                    modal.style.display = 'flex';
+                }
+            });
+            inputMidiImport.value = '';
+        });
+    }
+
+    if (btnCancel) {
+        btnCancel.addEventListener('click', () => {
+            modal.style.display = 'none';
+        });
+    }
+
+    if (btnConfirm) {
+        btnConfirm.addEventListener('click', () => {
+            if (!currentMidiTracks) return;
+            
+            for (let ch = 0; ch < 4; ch++) {
+                const select = document.getElementById(`midiMapCh${ch}`);
+                const trackIdx = select.value;
+                if (trackIdx !== "") {
+                    const track = currentMidiTracks[trackIdx];
+                    State.channels[ch] = convertMidiTrackToSequence(track.events, track.ppq);
+                } else {
+                    State.channels[ch] = [];
+                }
+            }
+            
+            if (currentMidiBpm) {
+                State.bpm = currentMidiBpm;
+                document.getElementById('tempoInput').value = currentMidiBpm;
+            }
+            
+            updateSequenceDisplay();
+            drawPianoRoll();
+            modal.style.display = 'none';
+            alert("MIDI-raidat kohdistettu ja tuotu sekvenssiin.");
+        });
+    }
 
     setupChannelControls();
 
@@ -2077,19 +2412,13 @@ function init() {
     if (btnPitchDown && btnPitchUp) {
         btnPitchDown.addEventListener('click', (e) => {
             e.preventDefault();
-            console.log("Pitch Down clicked");
             shiftSelectionPitch(-1);
         });
         
         btnPitchUp.addEventListener('click', (e) => {
             e.preventDefault();
-            console.log("Pitch Up clicked");
             shiftSelectionPitch(1);
         });
-        
-        console.log("Pitch buttons initialized");
-    } else {
-        console.error("Pitch buttons not found in DOM");
     }
 
     const defaultRootBtn = document.querySelector('#rootButtons button[data-root="0"]');
@@ -2100,99 +2429,9 @@ function init() {
     updateChannelUI();
     updateUIDimming();
     drawPianoRoll();
-    
-    console.log("Sovellus alustettu, aktiivinen kanava:", State.activeChannel);
 }
 
 function setupChannelControls() {
-    if (!document.querySelector('.channel-controls')) {
-        const channelContainer = document.createElement('div');
-        channelContainer.className = 'channel-controls';
-        channelContainer.style.margin = '10px 0';
-        channelContainer.style.padding = '10px';
-        channelContainer.style.backgroundColor = '#1a1a1a';
-        channelContainer.style.borderRadius = '5px';
-        
-        const channelDisplay = document.createElement('div');
-        channelDisplay.id = 'channelDisplay';
-        channelDisplay.style.marginBottom = '8px';
-        channelDisplay.style.fontWeight = 'bold';
-        channelDisplay.style.color = '#fff';
-        channelDisplay.textContent = 'Active: Chords';
-        channelContainer.appendChild(channelDisplay);
-        
-        const buttonsContainer = document.createElement('div');
-        buttonsContainer.style.display = 'flex';
-        buttonsContainer.style.gap = '8px';
-        
-        const channels = [
-            { id: 0, name: 'Chords', color: CONFIG.colors.ch0 },
-            { id: 1, name: 'Bass', color: CONFIG.colors.ch1 },
-            { id: 2, name: 'Lead', color: CONFIG.colors.ch2 }
-        ];
-        
-        channels.forEach(channel => {
-            const btn = document.createElement('button');
-            btn.className = 'channel-btn';
-            if (channel.id === 0) btn.classList.add('active');
-            btn.dataset.channel = channel.id;
-            btn.textContent = channel.name;
-            btn.style.backgroundColor = channel.color;
-            btn.style.color = '#fff';
-            btn.style.border = 'none';
-            btn.style.padding = '6px 12px';
-            btn.style.borderRadius = '4px';
-            btn.style.cursor = 'pointer';
-            btn.style.fontWeight = 'bold';
-            
-            btn.addEventListener('mouseover', () => {
-                btn.style.opacity = '0.8';
-            });
-            btn.addEventListener('mouseout', () => {
-                btn.style.opacity = '1';
-            });
-            
-            buttonsContainer.appendChild(btn);
-        });
-        
-        channelContainer.appendChild(buttonsContainer);
-        
-        const btnGenBass = document.createElement('button');
-        btnGenBass.id = 'btnGenBass';
-        btnGenBass.className = 'small-btn';
-        btnGenBass.textContent = 'Generate Bass from Chords';
-        btnGenBass.style.marginTop = '10px';
-        btnGenBass.style.backgroundColor = CONFIG.colors.ch1;
-        btnGenBass.style.color = '#fff';
-        btnGenBass.style.border = 'none';
-        btnGenBass.style.padding = '6px 12px';
-        btnGenBass.style.borderRadius = '4px';
-        btnGenBass.style.cursor = 'pointer';
-        btnGenBass.style.display = 'none';
-        
-        channelContainer.appendChild(btnGenBass);
-
-        const btnGenLead = document.createElement('button');
-        btnGenLead.id = 'btnGenLead';
-        btnGenLead.className = 'small-btn';
-        btnGenLead.textContent = 'Generate Lead from Chords';
-        btnGenLead.style.marginTop = '10px';
-        btnGenLead.style.backgroundColor = CONFIG.colors.ch2; 
-        btnGenLead.style.color = '#fff';
-        btnGenLead.style.border = 'none';
-        btnGenLead.style.padding = '6px 12px';
-        btnGenLead.style.borderRadius = '4px';
-        btnGenLead.style.cursor = 'pointer';
-        btnGenLead.style.display = 'none';
-        
-        channelContainer.appendChild(btnGenLead);
-        
-        const controlsSection = document.querySelector('.controls');
-        if (controlsSection) {
-            controlsSection.insertBefore(channelContainer, document.querySelector('.chord-controls'));
-        }
-    }
-    
     document.querySelectorAll('.channel-btn').forEach(btn => {
         const newBtn = btn.cloneNode(true);
         btn.parentNode.replaceChild(newBtn, btn);
@@ -2203,14 +2442,19 @@ function setupChannelControls() {
         });
     });
     
+    const btnGenLead = document.getElementById('btnGenLead');
+    if (btnGenLead) {
+        btnGenLead.addEventListener('click', generateLeadTrack);
+    }
+
     const btnGenBass = document.getElementById('btnGenBass');
     if (btnGenBass) {
         btnGenBass.addEventListener('click', generateBassTrack);
     }
 
-    const btnGenLead = document.getElementById('btnGenLead');
-    if (btnGenLead) {
-        btnGenLead.addEventListener('click', generateLeadTrack);
+    const btnGenDrums = document.getElementById('btnGenDrums');
+    if (btnGenDrums) {
+        btnGenDrums.addEventListener('click', generateDrumTrack);
     }
 }
 
