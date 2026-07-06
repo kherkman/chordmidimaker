@@ -1,4 +1,4 @@
-/* style.css - Updated for Multi-Track Support */
+/* style.css - Updated for Multi-Track & Drum Support */
 
 :root {
     /* Väripaletti */
@@ -35,22 +35,25 @@
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
-/* Scrollbar */
+/* Scrollbar - Suurennettu kosketusnäyttöystävälliseksi */
 ::-webkit-scrollbar {
-    width: 12px;
-    height: 12px;
+    width: 20px;
+    height: 20px;
 }
 ::-webkit-scrollbar-track {
-    background: #1a1a1a; 
-    border-radius: 4px;
+    background: #141414; 
+    border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb {
-    background: #444; 
-    border-radius: 6px;
-    border: 2px solid #1a1a1a;
+    background: #555; 
+    border-radius: 10px;
+    border: 4px solid #141414; /* Sisennys luo selkeän tarttumisalueen */
 }
 ::-webkit-scrollbar-thumb:hover {
-    background: #666; 
+    background: #888; 
+}
+::-webkit-scrollbar-thumb:active {
+    background: var(--primary-color); /* Aktiivinen raahaus antaa väripalautteen */
 }
 
 body {
@@ -469,18 +472,11 @@ button.dimmed:hover {
 
 /* Specific colors for channels if active */
 .channel-btn[data-channel="0"].active { color: var(--primary-color); border-top-color: var(--primary-color); }
-.channel-btn[data-channel="1"].active { color: #00bcd4; border-top-color: #00bcd4; } /* Cyan for Bass */
-.channel-btn[data-channel="2"].active { color: #ff9800; border-top-color: #ff9800; } /* Orange for Lead */
+.channel-btn[data-channel="1"].active { color: #ff9800; border-top-color: #ff9800; } /* Orange for Lead */
+.channel-btn[data-channel="2"].active { color: #00bcd4; border-top-color: #00bcd4; } /* Cyan for Bass */
+.channel-btn[data-channel="3"].active { color: #4caf50; border-top-color: #4caf50; } /* Green for Drums */
 
 /* Kanavakohtaiset värit edit-toolbar napeille */
-#btnGenBass {
-    background: #006064;
-    border-color: #00838f;
-}
-#btnGenBass:hover {
-    background: #00838f;
-}
-
 #btnGenLead {
     background: #e65100;
     border-color: #ff9800;
@@ -490,6 +486,22 @@ button.dimmed:hover {
     color: #000;
 }
 
+#btnGenBass {
+    background: #006064;
+    border-color: #00838f;
+}
+#btnGenBass:hover {
+    background: #00838f;
+}
+
+#btnGenDrums {
+    background: #1b5e20;
+    border-color: #4caf50;
+}
+#btnGenDrums:hover {
+    background: #2e7d32;
+    color: white;
+}
 
 /* Chord String Input */
 
@@ -585,4 +597,63 @@ input, textarea {
         transform: scale(0.98);
         opacity: 0.8;
     }
+}
+
+/* --- MODAL DIALOG --- */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+.modal-content {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 25px;
+    max-width: 450px;
+    width: 90%;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.mapping-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 10px 0;
+}
+
+.mapping-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.mapping-row label {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.mapping-row select {
+    flex-grow: 1;
+    max-width: 250px;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 10px;
 }
