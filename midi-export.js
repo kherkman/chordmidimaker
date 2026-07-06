@@ -1,31 +1,173 @@
 /**
  * midi-export.js
- * Muuntaa moniraitaisen sointudatan MIDI-tiedostoksi (Format 1).
- * Luo erilliset raidat Chords, Bass ja Lead -kanaville.
+ * Muuntaa moniraitaisen sointudatan MIDI-tiedostoksi (Format 1) ja tuo standardeja MIDI-tiedostoja (Import).
+ * Sisältää tempo-infon säädön (vienti & tuonti) sekä tarkan binary-lukijan.
  */
 
+// --- BINAARI-MIDI LUKIJA (TUONTI) ---
+class BinaryReader {
+    constructor(arrayBuffer) {
+        this.bytes = new Uint8Array(arrayBuffer);
+        this.pos = 0;
+    }
+    
+    readString(length) {
+        let str = "";
+        for (let i = 0; i < length; i++) {
+            str += String.fromCharCode(this.bytes[this.pos++]);
+        }
+        return str;
+    }
+    
+    readUInt32() {
+        const b = this.bytes;
+        const val = (b[this.pos] << 24) | (b[this.pos + 1] << 16) | (b[this.pos + 2] << 8) | b[this.pos + 3];
+        this.pos += 4;
+        return val >>> 0; 
+    }
+    
+    readUInt16() {
+        const b = this.bytes;
+        const val = (b[this.pos] << 8) | b[this.pos + 1];
+        this.pos += 2;
+        return val;
+    }
+    
+    readByte() {
+        return this.bytes[this.pos++];
+    }
+    
+    readVarInt() {
+        let value = 0;
+        let b;
+        do {
+            b = this.readByte();
+            value = (value << 7) | (b & 0x7F);
+        } while (b & 0x80);
+        return value;
+    }
+    
+    eof() {
+        return this.pos >= this.bytes.length;
+    }
+}
+
+function parseMidiFile(arrayBuffer) {
+    const reader = new BinaryReader(arrayBuffer);
+    const headerSig = reader.readString(4);
+    if (headerSig !== "MThd") {
+        throw new Error("Tiedosto ei ole kelvollinen MIDI-tiedosto.");
+    }
+    
+    const headerLength = reader.readUInt32();
+    const format = reader.readUInt16();
+    const numTracks = reader.readUInt16();
+    const ppq = reader.readUInt16(); 
+    
+    if (headerLength > 6) {
+        reader.pos += (headerLength - 6);
+    }
+    
+    const parsedTracks = [];
+    
+    for (let t = 0; t < numTracks; t++) {
+        const trackSig = reader.readString(4);
+        if (trackSig !== "MTrk") {
+            // Hypätään tuntemattomien lohkojen yli
+            const len = reader.readUInt32();
+            reader.pos += len;
+            continue;
+        }
+        
+        const trackLength = reader.readUInt32();
+        const endPos = reader.pos + trackLength;
+        
+        let absoluteTicks = 0;
+        let runningStatus = 0;
+        const events = [];
+        let trackName = `Track ${t + 1}`;
+        
+        while (reader.pos < endPos && !reader.eof()) {
+            const deltaTime = reader.readVarInt();
+            absoluteTicks += deltaTime;
+            
+            let statusByte = reader.readByte();
+            if (statusByte < 0x80) {
+                statusByte = runningStatus;
+                reader.pos--; 
+            } else {
+                runningStatus = statusByte;
+            }
+            
+            const eventType = statusByte & 0xF0;
+            const channel = statusByte & 0x0F;
+            
+            if (statusByte === 0xFF) {
+                const metaType = reader.readByte();
+                const len = reader.readVarInt();
+                
+                if (metaType === 0x03) {
+                    let name = "";
+                    for (let i = 0; i < len; i++) {
+                        name += String.fromCharCode(reader.readByte());
+                    }
+                    trackName = name.trim() || trackName;
+                } else if (metaType === 0x51 && len === 3) {
+                    const mspqn = (reader.readByte() << 16) | (reader.readByte() << 8) | reader.readByte();
+                    const bpm = Math.round(60000000 / mspqn);
+                    events.push({ type: 'tempo', ticks: absoluteTicks, bpm: bpm });
+                } else {
+                    reader.pos += len;
+                }
+            } else if (statusByte === 0xF0 || statusByte === 0xF7) {
+                const len = reader.readVarInt();
+                reader.pos += len;
+            } else {
+                if (eventType === 0x90 || eventType === 0x80) {
+                    const note = reader.readByte();
+                    const velocity = reader.readByte();
+                    const isNoteOn = (eventType === 0x90) && (velocity > 0);
+                    
+                    events.push({
+                        type: isNoteOn ? 'note_on' : 'note_off',
+                        ticks: absoluteTicks,
+                        note: note,
+                        velocity: velocity,
+                        channel: channel
+                    });
+                } else if (eventType === 0xA0 || eventType === 0xB0 || eventType === 0xE0) {
+                    reader.pos += 2;
+                } else if (eventType === 0xC0 || eventType === 0xD0) {
+                    reader.pos += 1;
+                }
+            }
+        }
+        
+        parsedTracks.push({
+            index: t,
+            name: trackName,
+            events: events,
+            ppq: ppq
+        });
+        
+        reader.pos = endPos;
+    }
+    
+    return parsedTracks;
+}
+
+// --- MIDI EXPORTER & IMPORTER OBJ ---
 const MidiExporter = {
     
     /**
-     * Pääfunktio: Lataa MIDI-tiedoston.
-     * @param {Array<Array>} channels - Array, joka sisältää raita-arrayt [ [chords], [bass], [lead] ]
-     * @param {Number} bpm - Tempo
+     * Lataa nykyiset raidat standardiksi MIDI-tiedostoksi.
      */
     downloadMidi: function(channels, bpm) {
-        // Varmista että channels on oikeanlainen taulukko
         if (!channels || !Array.isArray(channels)) {
             alert("Virheellinen data MIDI-vientiin.");
             return;
         }
         
-        // Jos channels on yksi sekvenssi (vanha tapa), muuta se moniraita-formaattiin
-        if (channels.length && channels[0].notes !== undefined) {
-            // Tämä on yhden kanavan sekvenssi, luo moniraita-array
-            console.warn("Yhden kanavan data havaittu, muunnetaan moniraita-formaattiin");
-            channels = [channels, [], []]; // Chords, tyhjä Bass, tyhjä Lead
-        }
-        
-        // Varmistetaan että meillä on dataa edes yhdessä kanavassa
         const hasData = channels.some(ch => ch && ch.length > 0);
         if (!hasData) {
             alert("Ei nuotteja vietäväksi.");
@@ -35,8 +177,9 @@ const MidiExporter = {
         console.log("Viedään MIDI:", { 
             channelCount: channels.length,
             chords: channels[0]?.length || 0,
-            bass: channels[1]?.length || 0,
-            lead: channels[2]?.length || 0,
+            lead: channels[1]?.length || 0,
+            bass: channels[2]?.length || 0,
+            drums: channels[3]?.length || 0,
             bpm: bpm 
         });
 
@@ -57,14 +200,50 @@ const MidiExporter = {
     },
 
     /**
-     * Rakentaa koko MIDI-tiedoston (Format 1).
+     * Standardi MIDI-tuontitoiminto tiedostosta.
+     */
+    importMidi: function(file, callback) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const arrayBuffer = e.target.result;
+                const parsedTracks = parseMidiFile(arrayBuffer);
+                
+                // Suodatetaan vain ne raidat, joissa on todellisia nuottitapahtumia
+                const activeTracks = parsedTracks.filter(t => t.events.some(evt => evt.type === 'note_on'));
+                
+                if (activeTracks.length === 0) {
+                    alert("MIDI-tiedostosta ei löytynyt soitettavia nuotteja.");
+                    return;
+                }
+                
+                // Etsitään mahdollinen tempo-tieto
+                let bpm = null;
+                for (let t of parsedTracks) {
+                    const tempoEvt = t.events.find(evt => evt.type === 'tempo');
+                    if (tempoEvt) {
+                        bpm = tempoEvt.bpm;
+                        break;
+                    }
+                }
+                
+                callback(activeTracks, bpm);
+            } catch (err) {
+                console.error("MIDI-tuonti epäonnistui:", err);
+                alert("MIDI-tuontivirhe: " + err.message);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    },
+
+    /**
+     * Rakentaa MIDI-tiedoston tavukokonaisuuden (Format 1).
      */
     buildMidiFile: function(channels, bpm) {
         const PPQ = 480; 
-        const trackCount = channels.length; // Yleensä 3
+        const trackCount = channels.length; 
         
-        // 1. HEADER CHUNK
-        // "MThd", Length(6), Format(1=MultiTrack), Tracks(N), PPQ
+        // HEADER CHUNK
         const header = [
             0x4D, 0x54, 0x68, 0x64, 
             0x00, 0x00, 0x00, 0x06, 
@@ -73,21 +252,16 @@ const MidiExporter = {
             (PPQ >> 8) & 0xFF, PPQ & 0xFF 
         ];
 
-        // 2. TRACK CHUNKS
         let allTracksData = [];
-
-        // Määritellään raitojen nimet
-        const trackNames = ["Chords", "Bass", "Lead"];
+        const trackNames = ["Chords", "Lead", "Bass", "Drums"];
 
         for (let i = 0; i < trackCount; i++) {
-            // Ensimmäiseen raitaan lisätään Tempo-tieto
             const isFirstTrack = (i === 0);
             const trackEvents = this.buildTrackEvents(channels[i], i, bpm, PPQ, isFirstTrack, trackNames[i]);
             
-            // Rakenna MTrk Header
             const trackLen = trackEvents.length;
             const trackHeader = [
-                0x4D, 0x54, 0x72, 0x6B, // "MTrk"
+                0x4D, 0x54, 0x72, 0x6B, 
                 (trackLen >> 24) & 0xFF,
                 (trackLen >> 16) & 0xFF,
                 (trackLen >> 8) & 0xFF,
@@ -100,16 +274,12 @@ const MidiExporter = {
         return header.concat(allTracksData);
     },
 
-    /**
-     * Rakentaa yksittäisen raidan tapahtumat (MTrk body).
-     */
     buildTrackEvents: function(sequence, channelIndex, bpm, PPQ, includeTempo, trackName) {
         let events = [];
 
-        // 1. Meta Events (Track Name)
-        // Delta 0, FF 03, len, text bytes
+        // Meta (Track Name)
         if (trackName) {
-            events.push(0x00); // Delta
+            events.push(0x00); 
             events.push(0xFF);
             events.push(0x03);
             const nameBytes = this.stringToBytes(trackName);
@@ -117,10 +287,10 @@ const MidiExporter = {
             events.push(...nameBytes);
         }
 
-        // 2. Meta Events (Tempo) - Vain 1. raidalle
+        // Meta (Tempo) - Sisältää tarkan tempo-tiedon
         if (includeTempo) {
             const microsecondsPerBeat = Math.round(60000000 / bpm);
-            events.push(0x00); // Delta
+            events.push(0x00); 
             events.push(0xFF);
             events.push(0x51);
             events.push(0x03);
@@ -129,21 +299,17 @@ const MidiExporter = {
             events.push(microsecondsPerBeat & 0xFF);
         }
 
-        // 3. Nuottitapahtumat (Note On / Note Off)
-        // Luodaan ensin lista absoluuttisen ajan tapahtumista
         let absEvents = [];
         let currentTick = 0;
 
         if (sequence && Array.isArray(sequence)) {
             sequence.forEach(step => {
-                const stepDurationTicks = Math.round(step.duration * PPQ);
+                const stepDurationTicks = Math.round(step.duration * (PPQ / 4)); // 1 unit of duration is 1/16th note
                 
                 if (step.notes && step.notes.length > 0) {
                     step.notes.forEach(note => {
-                        // Varmistetaan että nuotti on välillä 0-127
                         const safeNote = Math.max(0, Math.min(127, note));
                         
-                        // Note On
                         absEvents.push({
                             tick: currentTick,
                             type: 'on',
@@ -151,7 +317,6 @@ const MidiExporter = {
                             velocity: 90
                         });
                         
-                        // Note Off
                         absEvents.push({
                             tick: currentTick + stepDurationTicks,
                             type: 'off',
@@ -164,10 +329,8 @@ const MidiExporter = {
             });
         }
 
-        // Järjestä tapahtumat ajan mukaan
         absEvents.sort((a, b) => a.tick - b.tick);
 
-        // Muunna Delta-ajaksi ja tavuiksi
         let previousTick = 0;
         
         absEvents.forEach(evt => {
@@ -175,11 +338,10 @@ const MidiExporter = {
             const vlq = this.toVLQ(delta);
             events.push(...vlq);
             
-            // Status byte: 0x9n (Note On) tai 0x8n (Note Off)
-            // n = MIDI kanava (0-15). Käytetään channelIndexiä.
-            // Chords=0 (Ch1), Bass=1 (Ch2), Lead=2 (Ch3)
             const typeNibble = (evt.type === 'on') ? 0x90 : 0x80;
-            const status = typeNibble | (channelIndex & 0x0F);
+            // Rumpukanava (index 3) ohjataan standardille rumpukanavalle Ch 10 (indeksi 9)
+            const midiChannel = (channelIndex === 3) ? 9 : channelIndex;
+            const status = typeNibble | (midiChannel & 0x0F);
             
             events.push(status);
             events.push(evt.note);
@@ -188,7 +350,6 @@ const MidiExporter = {
             previousTick = evt.tick;
         });
 
-        // End of Track (Delta 0, FF 2F 00)
         events.push(0x00);
         events.push(0xFF);
         events.push(0x2F);
@@ -197,7 +358,6 @@ const MidiExporter = {
         return events;
     },
 
-    /** Apu: VLQ Muunnos */
     toVLQ: function(num) {
         let bytes = [];
         let temp = num;
@@ -210,7 +370,6 @@ const MidiExporter = {
         return bytes;
     },
 
-    /** Apu: Merkkijono tavuiksi */
     stringToBytes: function(str) {
         let bytes = [];
         for (let i = 0; i < str.length; i++) {
