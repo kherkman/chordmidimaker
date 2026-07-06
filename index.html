@@ -32,17 +32,31 @@
                 <span id="volumeValue">80%</span>
             </div>
 
-            <!-- Transpose & Color (Värivalitsin lisätään tähän JS:llä) -->
+            <!-- Custom WAV uploads -->
+            <div class="wav-upload-controls" style="display: flex; gap: 8px; background: var(--bg-input); padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid #333; align-items: center;">
+                <span style="font-size: 0.8rem; font-weight: bold; color: var(--text-muted); margin-right: 5px;">LOAD WAV:</span>
+                <button id="btnLoadWavCh1" class="small-btn" title="Lataa oma WAV chords-kanavalle">Ch 1</button>
+                <button id="btnLoadWavCh2" class="small-btn" title="Lataa oma WAV lead-kanavalle">Ch 2</button>
+                <button id="btnLoadWavCh3" class="small-btn" title="Lataa oma WAV bass-kanavalle">Ch 3</button>
+                
+                <input type="file" id="inputWavCh1" accept=".wav" style="display: none;">
+                <input type="file" id="inputWavCh2" accept=".wav" style="display: none;">
+                <input type="file" id="inputWavCh3" accept=".wav" style="display: none;">
+            </div>
+
+            <!-- Transpose & Color -->
             <div class="transpose-controls">
                 <button id="btnTransDown" class="small-btn">▼</button>
                 <span>Transpose</span>
                 <button id="btnTransUp" class="small-btn">▲</button>
-                <!-- JS lisää color-pickerin tähän -->
             </div>
 
-            <!-- Midi & Project (Save/Load lisätään tähän JS:llä) -->
+            <!-- Midi & Project -->
             <div class="midi-controls">
-                <!-- JS lisää Save/Load napit tähän -->
+                <!-- MIDI Import -->
+                <input type="file" id="inputMidiImport" accept=".mid,.midi" style="display: none;">
+                <button id="btnMidiImport" class="action-btn">Import MIDI</button>
+                
                 <select id="midiOutSelect">
                     <option value="">-- MIDI Out --</option>
                 </select>
@@ -88,7 +102,6 @@
                 <div class="control-group root-group">
                     <h4>Root Note (1-0, I, O) / Pause (P)</h4>
                     <div class="button-grid root-grid" id="rootButtons">
-                        <!-- Nuotit -->
                         <button data-root="0">C</button>
                         <button data-root="1">C#</button>
                         <button data-root="2">D</button>
@@ -101,7 +114,6 @@
                         <button data-root="9">A</button>
                         <button data-root="10">A#</button>
                         <button data-root="11">B</button>
-                        <!-- Tauko -->
                         <button data-root="pause" class="pause-btn">PAUSE</button>
                     </div>
                 </div>
@@ -111,31 +123,20 @@
             <div class="control-group">
                 <h4>Chord Type</h4>
                 <div class="button-grid type-grid" id="typeButtons">
-                    <!-- Basic -->
                     <button data-type="maj" class="selected">Maj</button>
                     <button data-type="min">Min</button>
-                    
-                    <!-- Suspended -->
                     <button data-type="sus2">Sus2</button>
                     <button data-type="sus4">Sus4</button>
-
-                    <!-- 6th -->
                     <button data-type="6">Maj6</button>
                     <button data-type="m6">Min6</button>
-
-                    <!-- 7th -->
                     <button data-type="7">7th Dom</button>
                     <button data-type="maj7">7th Maj</button>
                     <button data-type="m7">7th Min</button>
                     <button data-type="mmaj7">mMaj7</button>
-
-                    <!-- Dim / Aug -->
                     <button data-type="dim">Dim</button>
                     <button data-type="dim7">Dim7</button>
                     <button data-type="m7b5">m7b5</button>
                     <button data-type="aug">Aug</button>
-
-                    <!-- Extensions -->
                     <button data-type="add9">Add9</button>
                     <button data-type="9">9th</button>
                     <button data-type="11">11th</button>
@@ -208,11 +209,12 @@
         <!-- SEKVENSSI NÄKYMÄ -->
         <section class="sequence-section">
             
-            <!-- Channel Selector (UUSI) -->
+            <!-- Channel Selector (Päivitetty) -->
             <div class="channel-selector">
                 <button id="btnCh1" class="channel-btn active" data-channel="0">CH 1: Chords</button>
-                <button id="btnCh2" class="channel-btn" data-channel="1">CH 2: Bass</button>
-                <button id="btnCh3" class="channel-btn" data-channel="2">CH 3: Lead</button>
+                <button id="btnCh2" class="channel-btn" data-channel="1">CH 2: Lead</button>
+                <button id="btnCh3" class="channel-btn" data-channel="2">CH 3: Bass</button>
+                <button id="btnCh4" class="channel-btn" data-channel="3">CH 4: Drums</button>
             </div>
 
             <div class="control-group" style="display: flex; gap: 10px; align-items: center; margin-bottom: 5px;">
@@ -227,7 +229,6 @@
                 <button id="btnMoveLeft" class="small-btn" title="Siirrä vasemmalle (Q)">Move &lt; (Q)</button>
                 <button id="btnMoveRight" class="small-btn" title="Siirrä oikealle (E)">Move &gt; (E)</button>
                 <div class="separator"></div>
-                <!-- Transponoi valittua (Pitch) -->
                 <button id="btnPitchUp" class="small-btn" title="Nosta sävelkorkeutta">Pitch ▲</button>
                 <button id="btnPitchDown" class="small-btn" title="Laske sävelkorkeutta">Pitch ▼</button>
                 <div class="separator"></div>
@@ -235,9 +236,10 @@
                 <button id="btnDelete" class="small-btn danger" title="Poista valittu (D)">Delete (D)</button>
                 
                 <div class="separator"></div>
-                <!-- Generator Bass & Lead (Näkyvät kun CH2 tai CH3 valittu) -->
-                <button id="btnGenBass" class="small-btn action-btn" style="display:none; background: #006064; border-color: #00838f;">GENERATE BASS</button>
+                <!-- Generaattoripainikkeet -->
                 <button id="btnGenLead" class="small-btn action-btn" style="display:none; background: #e65100; border-color: #ff9800;">GENERATE LEAD</button>
+                <button id="btnGenBass" class="small-btn action-btn" style="display:none; background: #006064; border-color: #00838f;">GENERATE BASS</button>
+                <button id="btnGenDrums" class="small-btn action-btn" style="display:none; background: #1b5e20; border-color: #4caf50;">GENERATE DRUMS</button>
             </div>
 
             <!-- Piano Roll Wrapper (Scrollattava) -->
@@ -248,7 +250,39 @@
 
     </div>
 
-    <!-- Ulkoiset skriptit: Järjestys on tärkeä -->
+    <!-- MIDI IMPORT MAPPING MODAL -->
+    <div id="midiImportModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h3>MIDI-tuonnin kanavamääritys</h3>
+            <p class="info-text">Tiedosto sisältää useita raitoja. Valitse mitkä niistä tuodaan sovelluksen kanaville:</p>
+            
+            <div class="mapping-rows">
+                <div class="mapping-row">
+                    <label>CH 1: Chords:</label>
+                    <select id="midiMapCh0"><option value="">-- Ei mitään --</option></select>
+                </div>
+                <div class="mapping-row">
+                    <label>CH 2: Lead:</label>
+                    <select id="midiMapCh1"><option value="">-- Ei mitään --</option></select>
+                </div>
+                <div class="mapping-row">
+                    <label>CH 3: Bass:</label>
+                    <select id="midiMapCh2"><option value="">-- Ei mitään --</option></select>
+                </div>
+                <div class="mapping-row">
+                    <label>CH 4: Drums:</label>
+                    <select id="midiMapCh3"><option value="">-- Ei mitään --</option></select>
+                </div>
+            </div>
+            
+            <div class="modal-actions">
+                <button id="btnMidiImportCancel" class="small-btn danger">Peruuta</button>
+                <button id="btnMidiImportConfirm" class="action-btn">Tuo raidat</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Ulkoiset skriptit -->
     <script src="touch-events.js"></script>
     <script src="project-manager.js"></script>
     <script src="midi-export.js"></script>
